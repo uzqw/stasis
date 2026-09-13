@@ -37,15 +37,20 @@
 
 ## 阶段 2：引擎与 Linux 可用纵切
 
-- [ ] 单业务线程、命令队列、UI 快照、后端 generation。
-- [ ] evdev 后端接入共享 Keypad 和会话核心。
-- [ ] 启动确认、超时取消、部分抓取回滚、释放确认、worker 意外退出。
-- [ ] UI 面板显示 Stasis、标语、状态、解锁回显和配置入口。
-- [ ] 日志滚动、单实例、清理退出。
+- [x] 单业务线程、命令队列、UI 快照、后端 generation。
+- [x] evdev 后端接入共享 Keypad 和会话核心。
+- [x] 启动确认、超时取消、部分抓取回滚、释放确认、worker 意外退出。
+- [x] UI 面板显示 Stasis、标语、状态、解锁回显和配置入口。
+- [x] 日志滚动、单实例、清理退出。
 - [ ] UI 冻结时仍可密码/到期解锁；目录读写缓慢时不能永久阻塞释放。
 
 **出口：** 在有授权的 Linux X11 和 Wayland 桌面分别完成完整锁—Caps×3—密码—解锁流程，并执行下面的
 异常用例。未验证的桌面环境明确标注。
+
+**Linux 进展（2026-09-13）：** 已在授权 KDE Plasma + Wayland 桌面完成锁—Caps×3—密码—解锁全流程及
+异常用例（窗口外 Caps、自动重复、错密重试、再锁定、锁中 `kill`），记录见
+[notes/stasis-linux-realtest-leg2.md](notes/stasis-linux-realtest-leg2.md)。X11 桌面未单独验证；
+「UI 冻结时仍可解锁」等剩余项未覆盖。
 
 ## 阶段 3：Windows / macOS 一致性
 
