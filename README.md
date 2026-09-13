@@ -1,5 +1,7 @@
 # Stasis
 
+Stasis Domain
+
 **Pause the machine. Rest the human.**
 
 Input Locker 的 Rust 重写项目：暂停键盘、鼠标输入，让人休息。
