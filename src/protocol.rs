@@ -8,10 +8,10 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 #[cfg(not(test))]
+use crossbeam_channel::bounded;
+#[cfg(not(test))]
 use std::thread;
 use std::time::Duration;
-#[cfg(not(test))]
-use crossbeam_channel::bounded;
 
 pub const SCHEMA: &str = "input-locker.event/v1";
 pub const REQUESTED: &str = "rest.requested";
