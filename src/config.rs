@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -108,7 +108,9 @@ fn data_dir() -> io::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            return Ok(PathBuf::from(home).join("Library/Application Support").join(APP_NAME));
+            return Ok(PathBuf::from(home)
+                .join("Library/Application Support")
+                .join(APP_NAME));
         }
     }
     // Linux / generic
@@ -124,10 +126,14 @@ fn data_dir() -> io::Result<PathBuf> {
 
 fn default_events_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join("Downloads").join("input-locker-events");
+        return PathBuf::from(home)
+            .join("Downloads")
+            .join("input-locker-events");
     }
     if let Some(profile) = std::env::var_os("USERPROFILE") {
-        return PathBuf::from(profile).join("Downloads").join("input-locker-events");
+        return PathBuf::from(profile)
+            .join("Downloads")
+            .join("input-locker-events");
     }
     PathBuf::from("input-locker-events")
 }
@@ -135,13 +141,13 @@ fn default_events_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn validate_password_rules() {
-        let mut cfg = Config::default();
-        cfg.password = "abc123".into();
+        let mut cfg = Config {
+            password: "abc123".into(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
 
         cfg.password = "".into();
@@ -156,8 +162,10 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
-        let mut cfg = Config::default();
-        cfg.password = "hello99".into();
+        let cfg = Config {
+            password: "hello99".into(),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.password, "hello99");

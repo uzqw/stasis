@@ -1,21 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod config;
-mod engine;
-mod keypad;
-mod keymap;
-mod platform;
-mod protocol;
-mod session;
-mod ui;
-
 use std::sync::Arc;
 
 use tracing::{error, info};
 
 fn main() {
-    // Logging
-    let data_dir = match config::Config::config_path() {
+    let data_dir = match stasis::config::Config::config_path() {
         Ok(p) => p.parent().unwrap_or(&p).to_path_buf(),
         Err(_) => std::env::temp_dir().join("stasis"),
     };
@@ -29,19 +19,18 @@ fn main() {
 
     info!("Stasis starting");
 
-    let cfg = match config::Config::load() {
+    let cfg = match stasis::config::Config::load() {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to load config: {}", e);
-            // First-run: create default with empty password so UI can prompt
-            let mut c = config::Config::default();
-            c.password = "123456".into();
-            let _ = c.save();
-            c
+            stasis::config::Config::default()
         }
     };
+    if cfg.password.is_empty() {
+        info!("No password set; locking is disabled until one is configured");
+    }
 
-    let engine = Arc::new(engine::Engine::new(cfg));
+    let engine = Arc::new(stasis::engine::Engine::new(cfg));
     let snapshot = engine.snapshot();
 
     let native_options = eframe::NativeOptions {
@@ -55,11 +44,9 @@ fn main() {
     let _ = eframe::run_native(
         "Stasis",
         native_options,
-        Box::new(|_cc| Ok(Box::new(ui::App::new(engine, snapshot)))),
+        Box::new(|cc| {
+            stasis::ui::install_style(&cc.egui_ctx);
+            Ok(Box::new(stasis::ui::App::new(engine, snapshot)))
+        }),
     );
-}
-
-#[cfg(target_os = "windows")]
-mod build {
-    // Placeholder for build.rs content; actual manifest embedding goes in build.rs
 }

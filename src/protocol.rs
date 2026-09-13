@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -153,7 +152,14 @@ impl EventStore {
         now: DateTime<Utc>,
         causation_id: Option<String>,
     ) -> io::Result<Event> {
-        self.emit(&self.results_dir(), session_id, kind, data, now, causation_id)
+        self.emit(
+            &self.results_dir(),
+            session_id,
+            kind,
+            data,
+            now,
+            causation_id,
+        )
     }
 
     fn fsync_parent(path: &Path) -> io::Result<()> {

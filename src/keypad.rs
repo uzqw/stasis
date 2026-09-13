@@ -68,7 +68,8 @@ impl Keypad {
             }
             RawKey::CapsLock => {
                 self.caps_times.push(now);
-                self.caps_times.retain(|&t| now.duration_since(t) < CAPS_TRIGGER_WINDOW);
+                self.caps_times
+                    .retain(|&t| now.duration_since(t) < CAPS_TRIGGER_WINDOW);
                 if self.caps_times.len() >= CAPS_TRIGGER_COUNT {
                     self.caps_times.clear();
                     if !self.unlock_mode {
@@ -150,16 +151,15 @@ impl Default for Keypad {
 mod tests {
     use super::*;
 
-    fn t(sec: u64) -> Instant {
-        Instant::now() + Duration::from_secs(sec)
-    }
-
     #[test]
     fn caps_three_times_unlock_mode() {
         let mut k = Keypad::new();
         let now = Instant::now();
         assert_eq!(k.feed(now, RawKey::CapsLock), Action::None);
-        assert_eq!(k.feed(now + Duration::from_millis(300), RawKey::CapsLock), Action::None);
+        assert_eq!(
+            k.feed(now + Duration::from_millis(300), RawKey::CapsLock),
+            Action::None
+        );
         assert_eq!(
             k.feed(now + Duration::from_millis(600), RawKey::CapsLock),
             Action::UnlockMode
@@ -175,7 +175,10 @@ mod tests {
         k.feed(now + Duration::from_millis(300), RawKey::CapsLock);
         // third press outside window → no unlock
         assert_eq!(
-            k.feed(now + CAPS_TRIGGER_WINDOW + Duration::from_millis(10), RawKey::CapsLock),
+            k.feed(
+                now + CAPS_TRIGGER_WINDOW + Duration::from_millis(10),
+                RawKey::CapsLock
+            ),
             Action::None
         );
         assert!(!k.is_unlock_mode());
@@ -190,7 +193,10 @@ mod tests {
         k.feed(now + Duration::from_millis(600), RawKey::CapsLock);
         assert!(k.is_unlock_mode());
 
-        assert_eq!(k.feed(now, RawKey::Letter('a')), Action::Password { len: 1 });
+        assert_eq!(
+            k.feed(now, RawKey::Letter('a')),
+            Action::Password { len: 1 }
+        );
         k.shift_release(); // none pressed yet
         assert_eq!(k.feed(now, RawKey::Digit(1)), Action::Password { len: 2 });
         assert_eq!(k.password(), "a1");
@@ -204,7 +210,10 @@ mod tests {
         let now = Instant::now();
         // arm
         for i in 0..3 {
-            k.feed(now + Duration::from_millis(i as u64 * 300), RawKey::CapsLock);
+            k.feed(
+                now + Duration::from_millis(i as u64 * 300),
+                RawKey::CapsLock,
+            );
         }
         k.feed(now, RawKey::ShiftLeft);
         k.feed(now, RawKey::Letter('a'));
@@ -218,7 +227,10 @@ mod tests {
         let mut k = Keypad::new();
         let now = Instant::now();
         for i in 0..3 {
-            k.feed(now + Duration::from_millis(i as u64 * 300), RawKey::CapsLock);
+            k.feed(
+                now + Duration::from_millis(i as u64 * 300),
+                RawKey::CapsLock,
+            );
         }
         k.feed(now, RawKey::Letter('x'));
         assert!(k.is_unlock_mode());
@@ -232,7 +244,10 @@ mod tests {
         let mut k = Keypad::new();
         let now = Instant::now();
         for i in 0..3 {
-            k.feed(now + Duration::from_millis(i as u64 * 300), RawKey::CapsLock);
+            k.feed(
+                now + Duration::from_millis(i as u64 * 300),
+                RawKey::CapsLock,
+            );
         }
         // extra caps after armed must not disarm
         assert_eq!(k.feed(now, RawKey::CapsLock), Action::None);
@@ -244,7 +259,10 @@ mod tests {
         let mut k = Keypad::new();
         let now = Instant::now();
         for i in 0..3 {
-            k.feed(now + Duration::from_millis(i as u64 * 300), RawKey::CapsLock);
+            k.feed(
+                now + Duration::from_millis(i as u64 * 300),
+                RawKey::CapsLock,
+            );
         }
         for _ in 0..PASSWORD_MAX_LEN + 10 {
             k.feed(now, RawKey::Letter('a'));

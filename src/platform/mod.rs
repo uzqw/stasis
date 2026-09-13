@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Sender, bounded};
 
 use crate::keymap::RawKey;
 
@@ -44,10 +44,10 @@ impl Drop for Grab {
 
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "windows")]
-pub mod windows;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 /// Platform-specific grab constructor.
 #[cfg(target_os = "linux")]

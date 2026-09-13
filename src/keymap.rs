@@ -9,7 +9,7 @@ pub enum RawKey {
     ShiftRight,
     Backspace,
     Enter,
-    Digit(u8), // 0-9
+    Digit(u8),    // 0-9
     Letter(char), // a-z (shared logic upper-cases on Shift)
     Other,
 }

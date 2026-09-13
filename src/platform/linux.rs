@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,8 +25,8 @@ fn classify(dev: &evdev::Device) -> Option<DeviceKind> {
     }
     if keys.contains(evdev::KeyCode::BTN_LEFT)
         || keys.contains(evdev::KeyCode::BTN_TOUCH)
-        || rel.map_or(false, |r| r.contains(evdev::RelativeAxisCode::REL_X))
-        || abs.map_or(false, |a| a.contains(evdev::AbsoluteAxisCode::ABS_X))
+        || rel.is_some_and(|r| r.contains(evdev::RelativeAxisCode::REL_X))
+        || abs.is_some_and(|a| a.contains(evdev::AbsoluteAxisCode::ABS_X))
     {
         return Some(DeviceKind::Pointer);
     }
@@ -119,8 +119,7 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
                                     if value == 1 {
                                         let _ = tx.send(BackendEvent::Key(raw));
                                     } else if value == 0
-                                        && (raw == RawKey::ShiftLeft
-                                            || raw == RawKey::ShiftRight)
+                                        && (raw == RawKey::ShiftLeft || raw == RawKey::ShiftRight)
                                     {
                                         let _ = tx.send(BackendEvent::ShiftRelease);
                                     }

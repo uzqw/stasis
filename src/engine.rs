@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::config::Config;
 use crate::keypad::{Action, Keypad};
 use crate::platform::{BackendEvent, Grab};
-use crate::protocol::{poll_command, EventStore};
+use crate::protocol::EventStore;
 use crate::session::{Controller, LockOps};
 
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ pub enum UiCmd {
 enum BackendState {
     Idle,
     Locked {
-        grab: Grab,
+        _grab: Grab,
         rx: Receiver<BackendEvent>,
     },
 }
@@ -81,7 +81,7 @@ impl LockOps for BackendHandle {
             .reason("locked")
             .create()
             .ok();
-        self.state = BackendState::Locked { grab, rx };
+        self.state = BackendState::Locked { _grab: grab, rx };
         self._keepawake = ka;
         Ok(())
     }
@@ -117,7 +117,7 @@ impl Engine {
     }
 }
 
-fn run(config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCmd>) {
+fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCmd>) {
     let events_dir = config.effective_events_dir();
     let store = EventStore::new(&events_dir);
     let _ = store.ensure_dirs();
@@ -140,70 +140,77 @@ fn run(config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCmd>) 
 
         let oper = sel.select();
         match oper.index() {
-            i if i == ui_idx => {
-                match oper.recv(&cmd_rx) {
-                    Ok(UiCmd::Lock) => {
-                        if !backend.is_locked() {
-                            match backend.start_lock() {
-                                Ok(()) => {
-                                    keypad.reset();
-                                    update(&snapshot, |s| {
-                                        s.locked = true;
-                                        s.message = "已锁定".into();
-                                        s.ok = true;
-                                    });
-                                }
-                                Err(e) => {
-                                    update(&snapshot, |s| {
-                                        s.message = format!("锁定失败: {}", e);
-                                        s.ok = false;
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    Ok(UiCmd::Unlock) => {
-                        if backend.is_locked() {
-                            let now = Utc::now();
-                            let (ok, msg) = controller.unlock(&mut backend, "manual", now);
-                            keypad.cancel_unlock_mode();
+            i if i == ui_idx => match oper.recv(&cmd_rx) {
+                Ok(UiCmd::Lock) => {
+                    if !backend.is_locked() {
+                        if config.password.is_empty() {
                             update(&snapshot, |s| {
-                                s.locked = backend.is_locked();
-                                s.unlock_mode = false;
-                                s.password_len = 0;
-                                s.message = msg;
-                                s.ok = ok;
-                            });
-                        }
-                    }
-                    Ok(UiCmd::ChangePassword { old, new }) => {
-                        let mut cfg = config.clone();
-                        if old != cfg.password {
-                            update(&snapshot, |s| {
-                                s.message = "当前密码错误".into();
+                                s.message = "请先设置密码".into();
                                 s.ok = false;
                             });
-                        } else {
-                            cfg.password = new;
-                            match cfg.validate().and_then(|_| cfg.save()) {
-                                Ok(()) => {
-                                    update(&snapshot, |s| {
-                                        s.message = "密码已修改".into();
-                                        s.ok = true;
-                                    });
-                                }
-                                Err(e) => {
-                                    update(&snapshot, |s| {
-                                        s.message = format!("保存失败: {}", e);
-                                        s.ok = false;
-                                    });
-                                }
+                            continue;
+                        }
+                        match backend.start_lock() {
+                            Ok(()) => {
+                                keypad.reset();
+                                update(&snapshot, |s| {
+                                    s.locked = true;
+                                    s.message = "已锁定".into();
+                                    s.ok = true;
+                                });
+                            }
+                            Err(e) => {
+                                update(&snapshot, |s| {
+                                    s.message = format!("锁定失败: {}", e);
+                                    s.ok = false;
+                                });
                             }
                         }
                     }
-                    Ok(UiCmd::Exit) | Err(_) => break,
                 }
-            }
+                Ok(UiCmd::Unlock) => {
+                    if backend.is_locked() {
+                        let now = Utc::now();
+                        let (ok, msg) = controller.unlock(&mut backend, "manual", now);
+                        keypad.cancel_unlock_mode();
+                        let msg = unlock_display(ok, msg);
+                        update(&snapshot, |s| {
+                            s.locked = backend.is_locked();
+                            s.unlock_mode = false;
+                            s.password_len = 0;
+                            s.message = msg;
+                            s.ok = ok;
+                        });
+                    }
+                }
+                Ok(UiCmd::ChangePassword { old, new }) => {
+                    if old != config.password {
+                        update(&snapshot, |s| {
+                            s.message = "当前密码错误".into();
+                            s.ok = false;
+                        });
+                    } else {
+                        let mut candidate = config.clone();
+                        candidate.password = new;
+                        match candidate.validate().and_then(|_| candidate.save()) {
+                            Ok(()) => {
+                                config.password = candidate.password;
+                                update(&snapshot, |s| {
+                                    s.message = "密码已修改".into();
+                                    s.ok = true;
+                                });
+                            }
+                            Err(e) => {
+                                update(&snapshot, |s| {
+                                    s.message = format!("保存失败: {}", e);
+                                    s.ok = false;
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(UiCmd::Exit) | Err(_) => break,
+            },
             i if i == tick_idx => {
                 let now = Utc::now();
                 let msgs = controller.tick(&mut backend, now);
@@ -216,37 +223,36 @@ fn run(config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCmd>) 
                 }
                 // Poll command file
                 let dir = events_dir.parent().unwrap_or(&events_dir);
-                let _ = crate::protocol::poll_command(dir, |cmd| {
-                    match cmd.cmd.as_str() {
-                        "lock" => {
-                            if !backend.is_locked() {
-                                backend.start_lock()?;
-                                keypad.reset();
-                                update(&snapshot, |s| {
-                                    s.locked = true;
-                                    s.message = "命令触发锁定".into();
-                                    s.ok = true;
-                                });
-                            }
-                            Ok("ok".into())
+                let _ = crate::protocol::poll_command(dir, |cmd| match cmd.cmd.as_str() {
+                    "lock" => {
+                        if !backend.is_locked() {
+                            backend.start_lock()?;
+                            keypad.reset();
+                            update(&snapshot, |s| {
+                                s.locked = true;
+                                s.message = "命令触发锁定".into();
+                                s.ok = true;
+                            });
                         }
-                        "unlock" => {
-                            if backend.is_locked() {
-                                let now = Utc::now();
-                                let (ok, msg) = controller.unlock(&mut backend, "command", now);
-                                keypad.cancel_unlock_mode();
-                                update(&snapshot, |s| {
-                                    s.locked = backend.is_locked();
-                                    s.unlock_mode = false;
-                                    s.password_len = 0;
-                                    s.message = msg;
-                                    s.ok = ok;
-                                });
-                            }
-                            Ok("ok".into())
-                        }
-                        _ => Err(anyhow::anyhow!("unknown cmd")),
+                        Ok("ok".into())
                     }
+                    "unlock" => {
+                        if backend.is_locked() {
+                            let now = Utc::now();
+                            let (ok, msg) = controller.unlock(&mut backend, "command", now);
+                            keypad.cancel_unlock_mode();
+                            let msg = unlock_display(ok, msg);
+                            update(&snapshot, |s| {
+                                s.locked = backend.is_locked();
+                                s.unlock_mode = false;
+                                s.password_len = 0;
+                                s.message = msg;
+                                s.ok = ok;
+                            });
+                        }
+                        Ok("ok".into())
+                    }
+                    _ => Err(anyhow::anyhow!("unknown cmd")),
                 });
             }
             i if backend_idx.map(|idx| idx == i).unwrap_or(false) => {
@@ -321,6 +327,7 @@ fn handle_keypad_action(
                 let now = Utc::now();
                 let (ok, msg) = controller.unlock(backend, "password", now);
                 keypad.cancel_unlock_mode();
+                let msg = unlock_display(ok, msg);
                 update(snapshot, |s| {
                     s.locked = backend.is_locked();
                     s.unlock_mode = false;
@@ -349,4 +356,9 @@ where
     if let Ok(mut s) = snapshot.lock() {
         f(&mut s);
     }
+}
+
+/// Manual unlock shows a clear UI message; rest-session facts live in events.
+fn unlock_display(ok: bool, msg: String) -> String {
+    if ok { "已成功解锁".into() } else { msg }
 }

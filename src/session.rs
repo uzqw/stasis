@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
-use crate::protocol::{
-    Event, EventStore, EXPIRED, FAILED, LOCKED, OBSERVED, REQUESTED, UNLOCKED,
-};
+use crate::protocol::{EXPIRED, Event, EventStore, FAILED, LOCKED, OBSERVED, REQUESTED, UNLOCKED};
 
 fn parse_time(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
@@ -74,8 +72,11 @@ fn priority(kind: &str) -> u8 {
 pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session> {
     let mut ordered: Vec<_> = events.iter().collect();
     ordered.sort_by(|a, b| {
-        (&a.recorded_at, priority(&a.kind), &a.event_id)
-            .cmp(&(&b.recorded_at, priority(&b.kind), &b.event_id))
+        (&a.recorded_at, priority(&a.kind), &a.event_id).cmp(&(
+            &b.recorded_at,
+            priority(&b.kind),
+            &b.event_id,
+        ))
     });
 
     let mut sessions: HashMap<String, Session> = HashMap::new();
@@ -117,7 +118,9 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                 );
             }
             LOCKED => {
-                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let Some(s) = sessions.get_mut(&sid) else {
+                    continue;
+                };
                 let default = serde_json::Map::new();
                 let data = ev.data.as_object().unwrap_or(&default);
                 let locked_at = data
@@ -140,7 +143,9 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
             OBSERVED => {
-                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let Some(s) = sessions.get_mut(&sid) else {
+                    continue;
+                };
                 let default = serde_json::Map::new();
                 let data = ev.data.as_object().unwrap_or(&default);
                 let through = data
@@ -148,16 +153,19 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                     .and_then(|v| v.as_str())
                     .and_then(parse_time)
                     .unwrap_or(s.updated_at);
-                if let Some(seg) = s.segments.last_mut() {
-                    if seg.unlocked_at.is_none() && through > seg.locked_through {
-                        seg.locked_through = through;
-                    }
+                if let Some(seg) = s.segments.last_mut()
+                    && seg.unlocked_at.is_none()
+                    && through > seg.locked_through
+                {
+                    seg.locked_through = through;
                 }
                 s.phase = Phase::Active;
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
             UNLOCKED => {
-                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let Some(s) = sessions.get_mut(&sid) else {
+                    continue;
+                };
                 let default = serde_json::Map::new();
                 let data = ev.data.as_object().unwrap_or(&default);
                 let unlocked = data
@@ -171,18 +179,20 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                     .and_then(parse_time)
                     .unwrap_or(unlocked);
                 let reason = data.get("reason").and_then(|v| v.as_str());
-                if let Some(seg) = s.segments.last_mut() {
-                    if seg.unlocked_at.is_none() {
-                        seg.locked_through = seg.locked_through.max(through);
-                        seg.unlocked_at = Some(unlocked);
-                        seg.reason = reason.map(|s| s.to_string());
-                    }
+                if let Some(seg) = s.segments.last_mut()
+                    && seg.unlocked_at.is_none()
+                {
+                    seg.locked_through = seg.locked_through.max(through);
+                    seg.unlocked_at = Some(unlocked);
+                    seg.reason = reason.map(|s| s.to_string());
                 }
                 s.phase = Phase::Ended;
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
             FAILED => {
-                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let Some(s) = sessions.get_mut(&sid) else {
+                    continue;
+                };
                 let default = serde_json::Map::new();
                 let data = ev.data.as_object().unwrap_or(&default);
                 s.last_error = data
@@ -190,13 +200,19 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                     .and_then(|v| v.as_str())
                     .unwrap_or("lock failed")
                     .to_string();
-                if !data.get("retryable").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if !data
+                    .get("retryable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     s.phase = Phase::Failed;
                 }
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
             EXPIRED => {
-                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let Some(s) = sessions.get_mut(&sid) else {
+                    continue;
+                };
                 s.phase = Phase::Skipped;
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
@@ -283,7 +299,11 @@ impl Controller {
                         out.push(("计划休息锁定失败".into(), false));
                     }
                 } else {
-                    let through = s.segments.last().map(|seg| seg.locked_through).unwrap_or(now);
+                    let through = s
+                        .segments
+                        .last()
+                        .map(|seg| seg.locked_through)
+                        .unwrap_or(now);
                     let _ = self.store.emit_result(
                         &s.session_id,
                         UNLOCKED,
@@ -529,7 +549,7 @@ mod tests {
         let mut ctrl = Controller::new(store);
         request(&ctrl.store, "s1", 0, 10);
 
-        let msgs = ctrl.tick(&mut locker, base() + Duration::minutes(11));
+        let _msgs = ctrl.tick(&mut locker, base() + Duration::minutes(11));
         let sessions = ctrl.sessions(base() + Duration::minutes(11));
         assert_eq!(sessions["s1"].phase, Phase::Skipped);
     }
