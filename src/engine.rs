@@ -132,6 +132,8 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     let mut backend = BackendHandle::new();
     let mut keypad = Keypad::new();
     let tick_rx = crossbeam_channel::tick(Duration::from_secs(1));
+    let mut last_poll = Instant::now();
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
     loop {
         // Determine which channels to select on this iteration.
@@ -246,39 +248,42 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         s.ok = ok;
                     });
                 }
-                // Poll command file
-                let dir = events_dir.parent().unwrap_or(&events_dir);
-                let _ = crate::protocol::poll_command(dir, |cmd| match cmd.cmd.as_str() {
-                    "lock" => {
-                        if !backend.is_locked() {
-                            backend.start_lock()?;
-                            keypad.reset();
-                            update(&snapshot, |s| {
-                                s.locked = true;
-                                s.message = "命令触发锁定".into();
-                                s.ok = true;
-                            });
+                // Poll command file (throttled to avoid blocking the engine loop)
+                if Instant::now().duration_since(last_poll) >= POLL_INTERVAL {
+                    last_poll = Instant::now();
+                    let dir = events_dir.parent().unwrap_or(&events_dir);
+                    let _ = crate::protocol::poll_command(dir, |cmd| match cmd.cmd.as_str() {
+                        "lock" => {
+                            if !backend.is_locked() {
+                                backend.start_lock()?;
+                                keypad.reset();
+                                update(&snapshot, |s| {
+                                    s.locked = true;
+                                    s.message = "命令触发锁定".into();
+                                    s.ok = true;
+                                });
+                            }
+                            Ok("ok".into())
                         }
-                        Ok("ok".into())
-                    }
-                    "unlock" => {
-                        if backend.is_locked() {
-                            let now = Utc::now();
-                            let (ok, msg) = controller.unlock(&mut backend, "command", now);
-                            keypad.cancel_unlock_mode();
-                            let msg = unlock_display(ok, msg);
-                            update(&snapshot, |s| {
-                                s.locked = backend.is_locked();
-                                s.unlock_mode = false;
-                                s.password_len = 0;
-                                s.message = msg;
-                                s.ok = ok;
-                            });
+                        "unlock" => {
+                            if backend.is_locked() {
+                                let now = Utc::now();
+                                let (ok, msg) = controller.unlock(&mut backend, "command", now);
+                                keypad.cancel_unlock_mode();
+                                let msg = unlock_display(ok, msg);
+                                update(&snapshot, |s| {
+                                    s.locked = backend.is_locked();
+                                    s.unlock_mode = false;
+                                    s.password_len = 0;
+                                    s.message = msg;
+                                    s.ok = ok;
+                                });
+                            }
+                            Ok("ok".into())
                         }
-                        Ok("ok".into())
-                    }
-                    _ => Err(anyhow::anyhow!("unknown cmd")),
-                });
+                        _ => Err(anyhow::anyhow!("unknown cmd")),
+                    });
+                }
             }
             i if backend_idx.map(|idx| idx == i).unwrap_or(false) => {
                 let rx = backend_rx.as_ref().unwrap();
