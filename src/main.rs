@@ -31,7 +31,6 @@ fn main() {
     }
 
     let engine = Arc::new(stasis::engine::Engine::new(cfg));
-    let snapshot = engine.snapshot();
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -46,7 +45,7 @@ fn main() {
         native_options,
         Box::new(|cc| {
             stasis::ui::install_style(&cc.egui_ctx);
-            Ok(Box::new(stasis::ui::App::new(engine, snapshot)))
+            Ok(Box::new(stasis::ui::App::new(engine)))
         }),
     );
 }

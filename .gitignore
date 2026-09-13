@@ -4,6 +4,7 @@
 
 # Local session / tooling state
 .pi-web/
+.codegraph/
 *.bak-*
 
 # OS noise

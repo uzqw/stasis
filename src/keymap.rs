@@ -14,99 +14,55 @@ pub enum RawKey {
     Other,
 }
 
-// Linux evdev keycode -> RawKey
+// Linux evdev keycode -> RawKey (constants come from the evdev crate)
 #[cfg(target_os = "linux")]
 pub mod evdev {
     use super::RawKey;
+    use ::evdev::KeyCode as K;
 
-    pub const KEY_A: u16 = 30;
-    pub const KEY_B: u16 = 48;
-    pub const KEY_C: u16 = 46;
-    pub const KEY_D: u16 = 32;
-    pub const KEY_E: u16 = 18;
-    pub const KEY_F: u16 = 33;
-    pub const KEY_G: u16 = 34;
-    pub const KEY_H: u16 = 35;
-    pub const KEY_I: u16 = 23;
-    pub const KEY_J: u16 = 36;
-    pub const KEY_K: u16 = 37;
-    pub const KEY_L: u16 = 38;
-    pub const KEY_M: u16 = 50;
-    pub const KEY_N: u16 = 49;
-    pub const KEY_O: u16 = 24;
-    pub const KEY_P: u16 = 25;
-    pub const KEY_Q: u16 = 16;
-    pub const KEY_R: u16 = 19;
-    pub const KEY_S: u16 = 31;
-    pub const KEY_T: u16 = 20;
-    pub const KEY_U: u16 = 22;
-    pub const KEY_V: u16 = 47;
-    pub const KEY_W: u16 = 17;
-    pub const KEY_X: u16 = 45;
-    pub const KEY_Y: u16 = 21;
-    pub const KEY_Z: u16 = 44;
-
-    pub const KEY_1: u16 = 2;
-    pub const KEY_2: u16 = 3;
-    pub const KEY_3: u16 = 4;
-    pub const KEY_4: u16 = 5;
-    pub const KEY_5: u16 = 6;
-    pub const KEY_6: u16 = 7;
-    pub const KEY_7: u16 = 8;
-    pub const KEY_8: u16 = 9;
-    pub const KEY_9: u16 = 10;
-    pub const KEY_0: u16 = 11;
-
-    pub const KEY_BACKSPACE: u16 = 14;
-    pub const KEY_ENTER: u16 = 28;
-    pub const KEY_KPENTER: u16 = 96;
-    pub const KEY_CAPSLOCK: u16 = 58;
-    pub const KEY_LEFTSHIFT: u16 = 42;
-    pub const KEY_RIGHTSHIFT: u16 = 54;
-
-    pub fn to_raw(code: u16) -> RawKey {
-        match code {
-            KEY_CAPSLOCK => RawKey::CapsLock,
-            KEY_LEFTSHIFT => RawKey::ShiftLeft,
-            KEY_RIGHTSHIFT => RawKey::ShiftRight,
-            KEY_BACKSPACE => RawKey::Backspace,
-            KEY_ENTER | KEY_KPENTER => RawKey::Enter,
-            KEY_1 => RawKey::Digit(1),
-            KEY_2 => RawKey::Digit(2),
-            KEY_3 => RawKey::Digit(3),
-            KEY_4 => RawKey::Digit(4),
-            KEY_5 => RawKey::Digit(5),
-            KEY_6 => RawKey::Digit(6),
-            KEY_7 => RawKey::Digit(7),
-            KEY_8 => RawKey::Digit(8),
-            KEY_9 => RawKey::Digit(9),
-            KEY_0 => RawKey::Digit(0),
-            KEY_A => RawKey::Letter('a'),
-            KEY_B => RawKey::Letter('b'),
-            KEY_C => RawKey::Letter('c'),
-            KEY_D => RawKey::Letter('d'),
-            KEY_E => RawKey::Letter('e'),
-            KEY_F => RawKey::Letter('f'),
-            KEY_G => RawKey::Letter('g'),
-            KEY_H => RawKey::Letter('h'),
-            KEY_I => RawKey::Letter('i'),
-            KEY_J => RawKey::Letter('j'),
-            KEY_K => RawKey::Letter('k'),
-            KEY_L => RawKey::Letter('l'),
-            KEY_M => RawKey::Letter('m'),
-            KEY_N => RawKey::Letter('n'),
-            KEY_O => RawKey::Letter('o'),
-            KEY_P => RawKey::Letter('p'),
-            KEY_Q => RawKey::Letter('q'),
-            KEY_R => RawKey::Letter('r'),
-            KEY_S => RawKey::Letter('s'),
-            KEY_T => RawKey::Letter('t'),
-            KEY_U => RawKey::Letter('u'),
-            KEY_V => RawKey::Letter('v'),
-            KEY_W => RawKey::Letter('w'),
-            KEY_X => RawKey::Letter('x'),
-            KEY_Y => RawKey::Letter('y'),
-            KEY_Z => RawKey::Letter('z'),
+    pub fn to_raw(key: K) -> RawKey {
+        match key {
+            K::KEY_CAPSLOCK => RawKey::CapsLock,
+            K::KEY_LEFTSHIFT => RawKey::ShiftLeft,
+            K::KEY_RIGHTSHIFT => RawKey::ShiftRight,
+            K::KEY_BACKSPACE => RawKey::Backspace,
+            K::KEY_ENTER | K::KEY_KPENTER => RawKey::Enter,
+            K::KEY_1 => RawKey::Digit(1),
+            K::KEY_2 => RawKey::Digit(2),
+            K::KEY_3 => RawKey::Digit(3),
+            K::KEY_4 => RawKey::Digit(4),
+            K::KEY_5 => RawKey::Digit(5),
+            K::KEY_6 => RawKey::Digit(6),
+            K::KEY_7 => RawKey::Digit(7),
+            K::KEY_8 => RawKey::Digit(8),
+            K::KEY_9 => RawKey::Digit(9),
+            K::KEY_0 => RawKey::Digit(0),
+            K::KEY_A => RawKey::Letter('a'),
+            K::KEY_B => RawKey::Letter('b'),
+            K::KEY_C => RawKey::Letter('c'),
+            K::KEY_D => RawKey::Letter('d'),
+            K::KEY_E => RawKey::Letter('e'),
+            K::KEY_F => RawKey::Letter('f'),
+            K::KEY_G => RawKey::Letter('g'),
+            K::KEY_H => RawKey::Letter('h'),
+            K::KEY_I => RawKey::Letter('i'),
+            K::KEY_J => RawKey::Letter('j'),
+            K::KEY_K => RawKey::Letter('k'),
+            K::KEY_L => RawKey::Letter('l'),
+            K::KEY_M => RawKey::Letter('m'),
+            K::KEY_N => RawKey::Letter('n'),
+            K::KEY_O => RawKey::Letter('o'),
+            K::KEY_P => RawKey::Letter('p'),
+            K::KEY_Q => RawKey::Letter('q'),
+            K::KEY_R => RawKey::Letter('r'),
+            K::KEY_S => RawKey::Letter('s'),
+            K::KEY_T => RawKey::Letter('t'),
+            K::KEY_U => RawKey::Letter('u'),
+            K::KEY_V => RawKey::Letter('v'),
+            K::KEY_W => RawKey::Letter('w'),
+            K::KEY_X => RawKey::Letter('x'),
+            K::KEY_Y => RawKey::Letter('y'),
+            K::KEY_Z => RawKey::Letter('z'),
             _ => RawKey::Other,
         }
     }
@@ -242,13 +198,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn evdev_maps_qwerty() {
         use super::evdev;
-        assert_eq!(evdev::to_raw(evdev::KEY_A), RawKey::Letter('a'));
-        assert_eq!(evdev::to_raw(evdev::KEY_Z), RawKey::Letter('z'));
-        assert_eq!(evdev::to_raw(evdev::KEY_1), RawKey::Digit(1));
-        assert_eq!(evdev::to_raw(evdev::KEY_0), RawKey::Digit(0));
-        assert_eq!(evdev::to_raw(evdev::KEY_BACKSPACE), RawKey::Backspace);
-        assert_eq!(evdev::to_raw(evdev::KEY_ENTER), RawKey::Enter);
-        assert_eq!(evdev::to_raw(evdev::KEY_CAPSLOCK), RawKey::CapsLock);
+        use ::evdev::KeyCode as K;
+        assert_eq!(evdev::to_raw(K::KEY_A), RawKey::Letter('a'));
+        assert_eq!(evdev::to_raw(K::KEY_Z), RawKey::Letter('z'));
+        assert_eq!(evdev::to_raw(K::KEY_1), RawKey::Digit(1));
+        assert_eq!(evdev::to_raw(K::KEY_0), RawKey::Digit(0));
+        assert_eq!(evdev::to_raw(K::KEY_BACKSPACE), RawKey::Backspace);
+        assert_eq!(evdev::to_raw(K::KEY_ENTER), RawKey::Enter);
+        assert_eq!(evdev::to_raw(K::KEY_KPENTER), RawKey::Enter);
+        assert_eq!(evdev::to_raw(K::KEY_CAPSLOCK), RawKey::CapsLock);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::{Value as JsonValue, json};
+use serde_json::json;
 
 use crate::protocol::{EXPIRED, Event, EventStore, FAILED, LOCKED, OBSERVED, REQUESTED, UNLOCKED};
 
@@ -30,21 +30,6 @@ pub struct Segment {
     pub locked_through: DateTime<Utc>,
     pub unlocked_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
-}
-
-impl Segment {
-    pub fn as_json(&self) -> JsonValue {
-        let mut m = serde_json::Map::new();
-        m.insert("lockedAt".into(), json!(iso(self.locked_at)));
-        m.insert("lockedThrough".into(), json!(iso(self.locked_through)));
-        if let Some(ref t) = self.unlocked_at {
-            m.insert("unlockedAt".into(), json!(iso(*t)));
-        }
-        if let Some(ref r) = self.reason {
-            m.insert("endReason".into(), json!(r));
-        }
-        JsonValue::Object(m)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,13 +233,7 @@ impl Controller {
     }
 
     pub fn sessions(&self, now: DateTime<Utc>) -> HashMap<String, Session> {
-        #[cfg(test)]
-        let events = self.store.events();
-        #[cfg(not(test))]
-        let events = self
-            .store
-            .events_nonblocking(std::time::Duration::from_secs(2));
-        project(&events, now)
+        project(&self.store.events(), now)
     }
 
     /// Tick the schedule.  Returns zero or more status messages.
@@ -499,10 +478,6 @@ impl Controller {
                 (false, "解锁失败，请重试".into())
             }
         }
-    }
-
-    pub fn manual_lock(&mut self, locker: &mut impl LockOps, _now: DateTime<Utc>) -> bool {
-        locker.start_lock().is_ok()
     }
 }
 

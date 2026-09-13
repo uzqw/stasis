@@ -7,12 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-#[cfg(not(test))]
-use crossbeam_channel::bounded;
-#[cfg(not(test))]
-use std::thread;
-use std::time::Duration;
-
 pub const SCHEMA: &str = "input-locker.event/v1";
 pub const REQUESTED: &str = "rest.requested";
 pub const LOCKED: &str = "rest.locked";
@@ -20,7 +14,6 @@ pub const OBSERVED: &str = "rest.observed";
 pub const UNLOCKED: &str = "rest.unlocked";
 pub const FAILED: &str = "rest.failed";
 pub const EXPIRED: &str = "rest.expired";
-pub const TERMINAL: &[&str] = &[UNLOCKED, FAILED, EXPIRED];
 
 /// Immutable event on disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,34 +95,6 @@ impl EventStore {
         out.extend(self.read_dir(&self.requests_dir()));
         out.extend(self.read_dir(&self.results_dir()));
         out
-    }
-
-    /// Read events with a timeout to prevent blocking the engine thread
-    /// indefinitely on slow or unresponsive storage.
-    #[cfg(not(test))]
-    pub fn events_nonblocking(&self, timeout: Duration) -> Vec<Event> {
-        let root = self.root.clone();
-        let (tx, rx) = bounded(1);
-        thread::spawn(move || {
-            let store = EventStore::new(&root);
-            let _ = tx.send(store.events());
-        });
-        match rx.recv_timeout(timeout) {
-            Ok(events) => events,
-            Err(_) => {
-                tracing::warn!(
-                    "EventStore::events() timed out after {:?} on {}; returning empty",
-                    timeout,
-                    self.root.display()
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub fn events_nonblocking(&self, _timeout: Duration) -> Vec<Event> {
-        self.events()
     }
 
     fn read_dir(&self, dir: &Path) -> Vec<Event> {
@@ -246,8 +211,23 @@ pub struct Ack {
     pub ts: String,
 }
 
-/// Check for a pending command file, atomically move it to .processing,
-/// execute it, and write ack.
+/// Write the ack record next to the command file, atomically.
+fn write_ack(dir: &Path, cmd: &Command, result: String, error: Option<String>) -> io::Result<()> {
+    let ack = Ack {
+        cmd: cmd.cmd.clone(),
+        id: cmd.id.clone(),
+        result,
+        error,
+        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    };
+    let tmp = dir.join(".tmp-ack.json");
+    fs::write(&tmp, serde_json::to_string_pretty(&ack)?)?;
+    fs::rename(&tmp, dir.join("input-locker-ack.json"))
+}
+
+/// Check for a pending command file, atomically claim it, execute it,
+/// and write the ack.  A stale `.processing` left by a previous crash is
+/// treated as claimed and re-executed idempotently.
 pub fn poll_command(
     dir: impl AsRef<Path>,
     mut handler: impl FnMut(&Command) -> anyhow::Result<String>,
@@ -256,58 +236,25 @@ pub fn poll_command(
     let cmd_path = dir.join("input-locker-command.json");
     let processing = dir.join("input-locker-command.json.processing");
 
-    // Crash recovery: stale .processing from a previous crash
-    if processing.exists() {
-        let text = fs::read_to_string(&processing).unwrap_or_default();
-        if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
-            let (result, error) = match handler(&cmd) {
-                Ok(r) => (r, None),
-                Err(e) => ("error".into(), Some(e.to_string())),
-            };
-            let ack = Ack {
-                cmd: cmd.cmd.clone(),
-                id: cmd.id.clone(),
-                result,
-                error,
-                ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            };
-            let ack_path = dir.join("input-locker-ack.json");
-            let tmp = dir.join(".tmp-ack.json");
-            if fs::write(&tmp, serde_json::to_string_pretty(&ack)?).is_ok() {
-                let _ = fs::rename(&tmp, &ack_path);
-            }
+    // Atomic claim: fresh command file, or stale .processing from a crash.
+    if !processing.exists() {
+        match fs::rename(&cmd_path, &processing) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
         }
-        let _ = fs::remove_file(&processing);
-        return Ok(());
     }
 
-    // Atomic claim
-    match fs::rename(&cmd_path, &processing) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    if let Ok(text) = fs::read_to_string(&processing)
+        && let Ok(cmd) = serde_json::from_str::<Command>(&text)
+    {
+        let (result, error) = match handler(&cmd) {
+            Ok(r) => (r, None),
+            Err(e) => ("error".into(), Some(e.to_string())),
+        };
+        write_ack(dir, &cmd, result, error)?;
     }
 
-    let text = fs::read_to_string(&processing)?;
-    let cmd: Command = serde_json::from_str(&text)?;
-
-    let (result, error) = match handler(&cmd) {
-        Ok(r) => (r, None),
-        Err(e) => ("error".into(), Some(e.to_string())),
-    };
-
-    let ack = Ack {
-        cmd: cmd.cmd.clone(),
-        id: cmd.id.clone(),
-        result,
-        error,
-        ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    };
-
-    let ack_path = dir.join("input-locker-ack.json");
-    let tmp = dir.join(".tmp-ack.json");
-    fs::write(&tmp, serde_json::to_string_pretty(&ack)?)?;
-    fs::rename(&tmp, &ack_path)?;
     let _ = fs::remove_file(&processing);
     Ok(())
 }

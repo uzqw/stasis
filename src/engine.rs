@@ -179,17 +179,13 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 }
                 Ok(UiCmd::Unlock) => {
                     if backend.is_locked() {
-                        let now = Utc::now();
-                        let (ok, msg) = controller.unlock(&mut backend, "manual", now);
-                        keypad.cancel_unlock_mode();
-                        let msg = unlock_display(ok, msg);
-                        update(&snapshot, |s| {
-                            s.locked = backend.is_locked();
-                            s.unlock_mode = false;
-                            s.password_len = 0;
-                            s.message = msg;
-                            s.ok = ok;
-                        });
+                        perform_unlock(
+                            "manual",
+                            &mut keypad,
+                            &mut backend,
+                            &mut controller,
+                            &snapshot,
+                        );
                     }
                 }
                 Ok(UiCmd::ChangePassword { old, new }) => {
@@ -267,17 +263,13 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         }
                         "unlock" => {
                             if backend.is_locked() {
-                                let now = Utc::now();
-                                let (ok, msg) = controller.unlock(&mut backend, "command", now);
-                                keypad.cancel_unlock_mode();
-                                let msg = unlock_display(ok, msg);
-                                update(&snapshot, |s| {
-                                    s.locked = backend.is_locked();
-                                    s.unlock_mode = false;
-                                    s.password_len = 0;
-                                    s.message = msg;
-                                    s.ok = ok;
-                                });
+                                perform_unlock(
+                                    "command",
+                                    &mut keypad,
+                                    &mut backend,
+                                    &mut controller,
+                                    &snapshot,
+                                );
                             }
                             Ok("ok".into())
                         }
@@ -361,17 +353,7 @@ fn handle_keypad_action(
         Action::Submit => {
             let pwd = keypad.password().to_string();
             if pwd == config.password {
-                let now = Utc::now();
-                let (ok, msg) = controller.unlock(backend, "password", now);
-                keypad.cancel_unlock_mode();
-                let msg = unlock_display(ok, msg);
-                update(snapshot, |s| {
-                    s.locked = backend.is_locked();
-                    s.unlock_mode = false;
-                    s.password_len = 0;
-                    s.message = msg;
-                    s.ok = ok;
-                });
+                perform_unlock("password", keypad, backend, controller, snapshot);
             } else {
                 keypad.cancel_unlock_mode();
                 update(snapshot, |s| {
@@ -398,6 +380,27 @@ where
 /// Manual unlock shows a clear UI message; rest-session facts live in events.
 fn unlock_display(ok: bool, msg: String) -> String {
     if ok { "已成功解锁".into() } else { msg }
+}
+
+/// Unlock via the controller and mirror the result into the snapshot.
+fn perform_unlock(
+    reason: &str,
+    keypad: &mut Keypad,
+    backend: &mut BackendHandle,
+    controller: &mut Controller,
+    snapshot: &Arc<Mutex<Snapshot>>,
+) {
+    let now = Utc::now();
+    let (ok, msg) = controller.unlock(backend, reason, now);
+    keypad.cancel_unlock_mode();
+    let msg = unlock_display(ok, msg);
+    update(snapshot, |s| {
+        s.locked = backend.is_locked();
+        s.unlock_mode = false;
+        s.password_len = 0;
+        s.message = msg;
+        s.ok = ok;
+    });
 }
 
 #[cfg(test)]
