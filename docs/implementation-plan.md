@@ -24,16 +24,17 @@
 
 ## 阶段 1：共享核心与协议
 
-- [ ] 建立单 Cargo package、fmt/clippy/test 和目标特定依赖。
-- [ ] 实现共享 Keypad：Caps sticky、重复过滤、左右 Shift、退格、提交、长度上限。
-- [ ] 实现配置验证、原子保存、密码存储与显式旧配置导入。
-- [ ] 实现协议事件类型、校验、UTC 投影和明确的状态迁移。
-- [ ] 实现会话属主、重启恢复、提前解锁和定时结束。
-- [ ] 实现 command/ack 认领、防重复与崩溃恢复。
-- [ ] 明确并测试物理动作成功但事件写入失败的恢复路径。
+- [x] 建立单 Cargo package、fmt/clippy/test 和目标特定依赖。
+- [x] 实现共享 Keypad：Caps sticky、重复过滤、左右 Shift、退格、提交、长度上限。
+- [x] 实现配置验证、原子保存、密码存储与显式旧配置导入。
+- [x] 实现协议事件类型、校验、UTC 投影和明确的状态迁移。
+- [x] 实现会话属主、重启恢复、提前解锁和定时结束。
+- [x] 实现 command/ack 认领、防重复与崩溃恢复。
+- [x] 明确并测试物理动作成功但事件写入失败的恢复路径。
 
 **出口：** 不依赖 GUI/系统输入设备的测试可运行；与 aide Go 消费端共享 JSON 样例交叉验证。保留旧
 协议语义，不移植旧 `_check_plan` 死路径。
+**完成：** leg-1 (2026-09-13)。
 
 ## 阶段 2：引擎与 Linux 可用纵切
 
@@ -49,8 +50,13 @@
 
 **Linux 进展（2026-09-13）：** 已在授权 KDE Plasma + Wayland 桌面完成锁—Caps×3—密码—解锁全流程及
 异常用例（窗口外 Caps、自动重复、错密重试、再锁定、锁中 `kill`），记录见
-[notes/stasis-linux-realtest-leg2.md](notes/stasis-linux-realtest-leg2.md)。X11 桌面未单独验证；
-「UI 冻结时仍可解锁」等剩余项未覆盖。
+[notes/stasis-linux-realtest-leg2.md](notes/stasis-linux-realtest-leg2.md)。X11 桌面未单独验证。
+
+**Linux 进展（2026-09-14，leg-2）：**
+- evdev 后端改进：设备分类更健壮、跳过 IME 虚拟设备、热插拔失败上报、逐设备健康监控。
+- VM 隔离验证通过：`virtme-ng --disable-microvm` 内 release 二进制可正常抓取/释放虚拟设备，
+  记录见 [notes/stasis-linux-vmtest-leg2.md](notes/stasis-linux-vmtest-leg2.md)。
+- 剩余未覆盖：「UI 冻结时仍可密码/到期解锁；目录读写缓慢时不能永久阻塞释放」。
 
 ## 阶段 3：Windows / macOS 一致性
 
