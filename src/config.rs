@@ -36,13 +36,73 @@ impl Config {
     /// Load from the standard config path.  If missing, return default.
     pub fn load() -> anyhow::Result<Self> {
         let path = Self::config_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
+        if path.exists() {
+            let text = fs::read_to_string(&path)?;
+            let cfg: Self = serde_json::from_str(&text)?;
+            cfg.validate()?;
+            return Ok(cfg);
         }
-        let text = fs::read_to_string(&path)?;
-        let cfg: Self = serde_json::from_str(&text)?;
-        cfg.validate()?;
-        Ok(cfg)
+        if let Some(legacy) = Self::try_import_legacy() {
+            let _ = legacy.save();
+            return Ok(legacy);
+        }
+        Ok(Self::default())
+    }
+
+    /// Attempt to import a legacy `input-locker` config.
+    /// Looks at `INPUT_LOCKER_CONFIG`, sibling `input-locker/config.json`,
+    /// then `~/input-locker/config.json`.
+    pub fn try_import_legacy() -> Option<Self> {
+        let legacy_path = Self::legacy_config_path().ok()?;
+        if !legacy_path.exists() {
+            return None;
+        }
+        let text = fs::read_to_string(&legacy_path).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+
+        let password = value
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let events_dir = value
+            .get("schedule_file")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(default_events_dir);
+
+        let events_dir = std::env::var("INPUT_LOCKER_EVENTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(events_dir);
+
+        Some(Self {
+            password,
+            events_dir,
+            data_dir: None,
+        })
+    }
+
+    fn legacy_config_path() -> anyhow::Result<PathBuf> {
+        if let Ok(v) = std::env::var("INPUT_LOCKER_CONFIG") {
+            return Ok(PathBuf::from(v));
+        }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(exe_dir) = exe.parent()
+        {
+            let sibling = exe_dir.join("../input-locker/config.json");
+            if sibling.exists() {
+                return Ok(sibling);
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let fallback = PathBuf::from(home).join("input-locker").join("config.json");
+            if fallback.exists() {
+                return Ok(fallback);
+            }
+        }
+        anyhow::bail!("no legacy config found")
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -71,6 +131,29 @@ impl Config {
         }
         let dir = data_dir()?;
         Ok(dir.join(CONFIG_NAME))
+    }
+
+    #[cfg(test)]
+    fn load_from_dir(dir: &std::path::Path) -> anyhow::Result<Self> {
+        let path = dir.join(CONFIG_NAME);
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text = fs::read_to_string(&path)?;
+        let cfg: Self = serde_json::from_str(&text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[cfg(test)]
+    fn save_to_dir(&self, dir: &std::path::Path) -> anyhow::Result<()> {
+        self.validate()?;
+        let path = dir.join(CONFIG_NAME);
+        let tmp = path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(self)?;
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -173,7 +256,53 @@ mod tests {
 
     #[test]
     fn load_missing_returns_default() {
-        // Does not panic
-        let _ = Config::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config::load_from_dir(tmp.path()).unwrap();
+        assert!(cfg.password.is_empty());
+        assert_eq!(cfg.events_dir, default_events_dir());
+    }
+
+    #[test]
+    fn roundtrip_save_and_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            password: "stasis42".into(),
+            events_dir: tmp.path().join("events"),
+            data_dir: None,
+        };
+        cfg.save_to_dir(tmp.path()).unwrap();
+        let loaded = Config::load_from_dir(tmp.path()).unwrap();
+        assert_eq!(loaded.password, "stasis42");
+        assert_eq!(loaded.events_dir, tmp.path().join("events"));
+    }
+
+    #[test]
+    fn legacy_import_extracts_password_and_events_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("config.json");
+        fs::write(
+            &legacy,
+            r#"{"password":"legacy99","schedule_file":"/old/input-locker-plan.json"}"#,
+        )
+        .unwrap();
+
+        // Temporarily override legacy path resolution by using env var
+        let prev = std::env::var_os("INPUT_LOCKER_CONFIG");
+        unsafe { std::env::set_var("INPUT_LOCKER_CONFIG", &legacy) };
+        let imported = Config::try_import_legacy().unwrap();
+        if let Some(p) = prev {
+            unsafe { std::env::set_var("INPUT_LOCKER_CONFIG", p) };
+        } else {
+            unsafe { std::env::remove_var("INPUT_LOCKER_CONFIG") };
+        }
+
+        assert_eq!(imported.password, "legacy99");
+        assert_eq!(imported.events_dir, PathBuf::from("/old"));
+    }
+
+    #[test]
+    fn legacy_import_missing_returns_none() {
+        unsafe { std::env::remove_var("INPUT_LOCKER_CONFIG") };
+        assert!(Config::try_import_legacy().is_none());
     }
 }
