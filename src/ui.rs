@@ -71,7 +71,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(engine: Arc<Engine>, snapshot: Arc<Mutex<Snapshot>>) -> Self {
+    pub fn new(engine: Arc<Engine>) -> Self {
+        let snapshot = engine.snapshot();
         Self {
             engine,
             snapshot,

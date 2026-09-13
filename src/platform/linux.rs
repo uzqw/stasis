@@ -87,9 +87,8 @@ fn open_and_grab_all() -> anyhow::Result<HashMap<PathBuf, evdev::Device>> {
     Ok(grabbed)
 }
 
-fn raw_from_evdev(code: u16) -> Option<RawKey> {
-    use crate::keymap::evdev;
-    let raw = evdev::to_raw(code);
+fn raw_from_evdev(key: evdev::KeyCode) -> Option<RawKey> {
+    let raw = crate::keymap::evdev::to_raw(key);
     if raw == RawKey::Other {
         None
     } else {
@@ -153,16 +152,14 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
                         for ev in iter {
                             if let evdev::EventSummary::Key(_key_ev, key_code, value) =
                                 ev.destructure()
+                                && let Some(raw) = raw_from_evdev(key_code)
                             {
-                                let code = key_code.0;
-                                if let Some(raw) = raw_from_evdev(code) {
-                                    if value == 1 {
-                                        let _ = tx.send(BackendEvent::Key(raw));
-                                    } else if value == 0
-                                        && (raw == RawKey::ShiftLeft || raw == RawKey::ShiftRight)
-                                    {
-                                        let _ = tx.send(BackendEvent::ShiftRelease);
-                                    }
+                                if value == 1 {
+                                    let _ = tx.send(BackendEvent::Key(raw));
+                                } else if value == 0
+                                    && (raw == RawKey::ShiftLeft || raw == RawKey::ShiftRight)
+                                {
+                                    let _ = tx.send(BackendEvent::ShiftRelease);
                                 }
                             }
                         }
