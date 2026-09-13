@@ -1,0 +1,582 @@
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
+use serde_json::{json, Value as JsonValue};
+
+use crate::protocol::{
+    Event, EventStore, EXPIRED, FAILED, LOCKED, OBSERVED, REQUESTED, UNLOCKED,
+};
+
+fn parse_time(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn iso(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Phase {
+    Waiting,
+    Active,
+    Ended,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    pub locked_at: DateTime<Utc>,
+    pub locked_through: DateTime<Utc>,
+    pub unlocked_at: Option<DateTime<Utc>>,
+    pub reason: Option<String>,
+}
+
+impl Segment {
+    pub fn as_json(&self) -> JsonValue {
+        let mut m = serde_json::Map::new();
+        m.insert("lockedAt".into(), json!(iso(self.locked_at)));
+        m.insert("lockedThrough".into(), json!(iso(self.locked_through)));
+        if let Some(ref t) = self.unlocked_at {
+            m.insert("unlockedAt".into(), json!(iso(*t)));
+        }
+        if let Some(ref r) = self.reason {
+            m.insert("endReason".into(), json!(r));
+        }
+        JsonValue::Object(m)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    pub session_id: String,
+    pub lock_at: DateTime<Utc>,
+    pub unlock_at: DateTime<Utc>,
+    pub phase: Phase,
+    pub segments: Vec<Segment>,
+    pub last_error: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn priority(kind: &str) -> u8 {
+    match kind {
+        REQUESTED => 0,
+        LOCKED => 1,
+        OBSERVED => 2,
+        UNLOCKED | FAILED | EXPIRED => 3,
+        _ => 9,
+    }
+}
+
+/// Replay all events into sessions.
+pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session> {
+    let mut ordered: Vec<_> = events.iter().collect();
+    ordered.sort_by(|a, b| {
+        (&a.recorded_at, priority(&a.kind), &a.event_id)
+            .cmp(&(&b.recorded_at, priority(&b.kind), &b.event_id))
+    });
+
+    let mut sessions: HashMap<String, Session> = HashMap::new();
+
+    for ev in ordered {
+        let sid = ev.session_id.clone();
+        match ev.kind.as_str() {
+            REQUESTED => {
+                if sessions.contains_key(&sid) {
+                    continue;
+                }
+                let default = serde_json::Map::new();
+                let data = ev.data.as_object().unwrap_or(&default);
+                let lock_at = data
+                    .get("lockAt")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(now);
+                let unlock_at = data
+                    .get("unlockAt")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(now);
+                if lock_at >= unlock_at {
+                    continue;
+                }
+                let updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+                sessions.insert(
+                    sid.clone(),
+                    Session {
+                        session_id: sid,
+                        lock_at,
+                        unlock_at,
+                        phase: Phase::Waiting,
+                        segments: Vec::new(),
+                        last_error: String::new(),
+                        updated_at,
+                    },
+                );
+            }
+            LOCKED => {
+                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let default = serde_json::Map::new();
+                let data = ev.data.as_object().unwrap_or(&default);
+                let locked_at = data
+                    .get("lockedAt")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(s.updated_at);
+                let locked_through = data
+                    .get("lockedThrough")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(locked_at);
+                s.segments.push(Segment {
+                    locked_at,
+                    locked_through,
+                    unlocked_at: None,
+                    reason: None,
+                });
+                s.phase = Phase::Active;
+                s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+            }
+            OBSERVED => {
+                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let default = serde_json::Map::new();
+                let data = ev.data.as_object().unwrap_or(&default);
+                let through = data
+                    .get("lockedThrough")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(s.updated_at);
+                if let Some(seg) = s.segments.last_mut() {
+                    if seg.unlocked_at.is_none() && through > seg.locked_through {
+                        seg.locked_through = through;
+                    }
+                }
+                s.phase = Phase::Active;
+                s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+            }
+            UNLOCKED => {
+                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let default = serde_json::Map::new();
+                let data = ev.data.as_object().unwrap_or(&default);
+                let unlocked = data
+                    .get("unlockedAt")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(s.updated_at);
+                let through = data
+                    .get("lockedThrough")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_time)
+                    .unwrap_or(unlocked);
+                let reason = data.get("reason").and_then(|v| v.as_str());
+                if let Some(seg) = s.segments.last_mut() {
+                    if seg.unlocked_at.is_none() {
+                        seg.locked_through = seg.locked_through.max(through);
+                        seg.unlocked_at = Some(unlocked);
+                        seg.reason = reason.map(|s| s.to_string());
+                    }
+                }
+                s.phase = Phase::Ended;
+                s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+            }
+            FAILED => {
+                let Some(s) = sessions.get_mut(&sid) else { continue };
+                let default = serde_json::Map::new();
+                let data = ev.data.as_object().unwrap_or(&default);
+                s.last_error = data
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("lock failed")
+                    .to_string();
+                if !data.get("retryable").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    s.phase = Phase::Failed;
+                }
+                s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+            }
+            EXPIRED => {
+                let Some(s) = sessions.get_mut(&sid) else { continue };
+                s.phase = Phase::Skipped;
+                s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
+            }
+            _ => {}
+        }
+    }
+
+    // Any still-waiting session whose window has passed is skipped.
+    for s in sessions.values_mut() {
+        if s.phase == Phase::Waiting && now >= s.unlock_at {
+            s.phase = Phase::Skipped;
+        }
+    }
+
+    sessions
+}
+
+/// Trait abstracting the physical lock/unlock operation.
+pub trait LockOps {
+    fn is_locked(&self) -> bool;
+    fn start_lock(&mut self) -> anyhow::Result<()>;
+    fn stop_lock(&mut self) -> anyhow::Result<()>;
+}
+
+/// Rest-session controller.  Owns the event store and schedule.
+pub struct Controller {
+    store: EventStore,
+}
+
+impl Controller {
+    pub fn new(store: EventStore) -> Self {
+        Self { store }
+    }
+
+    pub fn sessions(&self, now: DateTime<Utc>) -> HashMap<String, Session> {
+        project(&self.store.events(), now)
+    }
+
+    /// Tick the schedule.  Returns zero or more status messages.
+    pub fn tick(&mut self, locker: &mut impl LockOps, now: DateTime<Utc>) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        let sessions = self.sessions(now);
+        let mut active: Vec<_> = sessions
+            .values()
+            .filter(|s| s.phase == Phase::Active)
+            .cloned()
+            .collect();
+        active.sort_by_key(|s| s.lock_at);
+
+        // Handle non-active sessions first (expired waiting requests)
+        for s in sessions.values() {
+            if s.phase == Phase::Waiting && now >= s.unlock_at {
+                let _ = self.store.emit_result(
+                    &s.session_id,
+                    EXPIRED,
+                    json!({"reason": "window_missed"}),
+                    now,
+                    None,
+                );
+            }
+        }
+
+        // Active sessions: reconcile desired state from events, not memory.
+        for s in active {
+            if !locker.is_locked() {
+                if now < s.unlock_at {
+                    if locker.start_lock().is_ok() {
+                        let _ = self.store.emit_result(
+                            &s.session_id,
+                            LOCKED,
+                            json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
+                            now,
+                            None,
+                        );
+                        out.push(("计划休息已恢复锁定".into(), true));
+                    } else {
+                        let _ = self.store.emit_result(
+                            &s.session_id,
+                            FAILED,
+                            json!({"action": "lock", "error": "lock failed", "retryable": true}),
+                            now,
+                            None,
+                        );
+                        out.push(("计划休息锁定失败".into(), false));
+                    }
+                } else {
+                    let through = s.segments.last().map(|seg| seg.locked_through).unwrap_or(now);
+                    let _ = self.store.emit_result(
+                        &s.session_id,
+                        UNLOCKED,
+                        json!({
+                            "unlockedAt": iso(through),
+                            "lockedThrough": iso(through),
+                            "reason": "failure",
+                        }),
+                        now,
+                        None,
+                    );
+                    out.push(("计划休息锁定意外结束".into(), false));
+                }
+                continue;
+            }
+
+            let last = s
+                .segments
+                .last()
+                .map(|seg| seg.locked_through)
+                .unwrap_or(s.lock_at);
+            if now.signed_duration_since(last) >= Duration::seconds(30) {
+                let _ = self.store.emit_result(
+                    &s.session_id,
+                    OBSERVED,
+                    json!({"lockedThrough": iso(now)}),
+                    now,
+                    None,
+                );
+            }
+
+            if now >= s.unlock_at {
+                if locker.stop_lock().is_ok() {
+                    let _ = self.store.emit_result(
+                        &s.session_id,
+                        UNLOCKED,
+                        json!({
+                            "unlockedAt": iso(now),
+                            "lockedThrough": iso(now),
+                            "reason": "scheduled",
+                        }),
+                        now,
+                        None,
+                    );
+                    out.push(("计划休息完成".into(), true));
+                } else {
+                    out.push(("计划休息解锁失败，正在重试".into(), false));
+                }
+            }
+        }
+
+        // Waiting sessions that are due to start
+        let mut waiting: Vec<_> = sessions
+            .values()
+            .filter(|s| s.phase == Phase::Waiting && now >= s.lock_at && now < s.unlock_at)
+            .cloned()
+            .collect();
+        waiting.sort_by_key(|s| s.lock_at);
+        for s in waiting {
+            if locker.is_locked() {
+                continue;
+            }
+            if locker.start_lock().is_ok() {
+                let _ = self.store.emit_result(
+                    &s.session_id,
+                    LOCKED,
+                    json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
+                    now,
+                    None,
+                );
+                out.push(("计划休息已锁定".into(), true));
+            } else {
+                let _ = self.store.emit_result(
+                    &s.session_id,
+                    FAILED,
+                    json!({"action": "lock", "error": "lock failed", "retryable": true}),
+                    now,
+                    None,
+                );
+                out.push(("计划休息锁定失败".into(), false));
+            }
+        }
+
+        out
+    }
+
+    /// Password or admin unlock.  Returns (ok, message).
+    pub fn unlock(
+        &mut self,
+        locker: &mut impl LockOps,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> (bool, String) {
+        let sessions = self.sessions(now);
+        let active: Vec<_> = sessions
+            .values()
+            .filter(|s| s.phase == Phase::Active)
+            .cloned()
+            .collect();
+        if active.is_empty() {
+            match locker.stop_lock() {
+                Ok(()) => return (true, "no_rest_session".into()),
+                Err(_) => return (false, "解锁失败，请重试".into()),
+            }
+        }
+        let session = &active[0];
+        match locker.stop_lock() {
+            Ok(()) => {
+                let _ = self.store.emit_result(
+                    &session.session_id,
+                    UNLOCKED,
+                    json!({"unlockedAt": iso(now), "lockedThrough": iso(now), "reason": reason}),
+                    now,
+                    None,
+                );
+                let msg = if reason == "password" {
+                    "休息提前结束"
+                } else {
+                    "计划休息已解锁"
+                };
+                (true, msg.into())
+            }
+            Err(_) => (false, "解锁失败，请重试".into()),
+        }
+    }
+
+    pub fn manual_lock(&mut self, locker: &mut impl LockOps, _now: DateTime<Utc>) -> bool {
+        locker.start_lock().is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    struct FakeLocker {
+        locked: bool,
+        fail_start: bool,
+        fail_stop: bool,
+    }
+
+    impl LockOps for FakeLocker {
+        fn is_locked(&self) -> bool {
+            self.locked
+        }
+        fn start_lock(&mut self) -> anyhow::Result<()> {
+            if self.fail_start {
+                anyhow::bail!("fail");
+            }
+            self.locked = true;
+            Ok(())
+        }
+        fn stop_lock(&mut self) -> anyhow::Result<()> {
+            if self.fail_stop {
+                anyhow::bail!("fail");
+            }
+            self.locked = false;
+            Ok(())
+        }
+    }
+
+    fn base() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-08T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn request(store: &EventStore, sid: &str, start_min: i64, dur_min: i64) {
+        let b = base();
+        store
+            .emit(
+                &store.requests_dir(),
+                sid,
+                REQUESTED,
+                json!({
+                    "lockAt": iso(b + Duration::minutes(start_min)),
+                    "unlockAt": iso(b + Duration::minutes(start_min + dur_min)),
+                    "minUnlockSeconds": 0,
+                    "source": "rest-break",
+                }),
+                b,
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn full_rest_locks_and_unlocks() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        let msgs = ctrl.tick(&mut locker, base());
+        assert!(msgs.iter().any(|(m, _)| m == "计划休息已锁定"));
+        assert!(locker.is_locked());
+
+        let msgs = ctrl.tick(&mut locker, base() + Duration::minutes(10));
+        assert!(msgs.iter().any(|(m, _)| m == "计划休息完成"));
+        assert!(!locker.is_locked());
+
+        let sessions = ctrl.sessions(base() + Duration::minutes(10));
+        let s = &sessions["s1"];
+        assert_eq!(s.phase, Phase::Ended);
+        assert_eq!(s.segments[0].reason, Some("scheduled".into()));
+    }
+
+    #[test]
+    fn password_unlock_allowed_immediately() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        let (ok, msg) = ctrl.unlock(&mut locker, "password", base() + Duration::seconds(1));
+        assert!(ok);
+        assert_eq!(msg, "休息提前结束");
+        assert!(!locker.is_locked());
+    }
+
+    #[test]
+    fn expired_request_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        let msgs = ctrl.tick(&mut locker, base() + Duration::minutes(11));
+        let sessions = ctrl.sessions(base() + Duration::minutes(11));
+        assert_eq!(sessions["s1"].phase, Phase::Skipped);
+    }
+
+    #[test]
+    fn restart_relocks_active() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        // Simulate restart: new controller, same store, locker starts unlocked
+        let mut locker2 = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl2 = Controller::new(EventStore::new(tmp.path()));
+        let msgs = ctrl2.tick(&mut locker2, base() + Duration::minutes(1));
+        assert!(msgs.iter().any(|(m, _)| m == "计划休息已恢复锁定"));
+        assert!(locker2.is_locked());
+    }
+
+    #[test]
+    fn retryable_lock_failure_is_retried() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: true,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        let msgs = ctrl.tick(&mut locker, base());
+        assert!(msgs.iter().any(|(m, _)| m == "计划休息锁定失败"));
+        assert!(!locker.is_locked());
+        // phase stays waiting because retryable
+        let sessions = ctrl.sessions(base());
+        assert_eq!(sessions["s1"].phase, Phase::Waiting);
+    }
+}

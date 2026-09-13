@@ -1,0 +1,137 @@
+use std::sync::{Arc, Mutex};
+
+use eframe::egui;
+
+use crate::engine::{Engine, Snapshot, UiCmd};
+
+pub struct App {
+    engine: Arc<Engine>,
+    snapshot: Arc<Mutex<Snapshot>>,
+    old_password: String,
+    new_password: String,
+    confirm_password: String,
+    show_change: bool,
+    last_focus: u64,
+}
+
+impl App {
+    pub fn new(engine: Arc<Engine>, snapshot: Arc<Mutex<Snapshot>>) -> Self {
+        Self {
+            engine,
+            snapshot,
+            old_password: String::new(),
+            new_password: String::new(),
+            confirm_password: String::new(),
+            show_change: false,
+            last_focus: 0,
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let snap = self.snapshot.lock().unwrap().clone();
+
+        if snap.focus_request != self.last_focus {
+            self.last_focus = snap.focus_request;
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::AlwaysOnTop,
+            ));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        if !snap.locked {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::Normal,
+            ));
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) && snap.locked {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let snap = self.snapshot.lock().unwrap().clone();
+
+        ui.vertical_centered(|ui| {
+            ui.heading("Stasis");
+            ui.label("Pause the machine. Rest the human.");
+            ui.add_space(16.0);
+
+            if snap.locked {
+                ui.colored_label(egui::Color32::from_rgb(255, 59, 48), "已锁定");
+            } else {
+                ui.colored_label(egui::Color32::from_rgb(52, 199, 89), "未锁定");
+            }
+            ui.add_space(12.0);
+
+            if !snap.message.is_empty() {
+                let color = if snap.ok {
+                    egui::Color32::from_rgb(52, 199, 89)
+                } else {
+                    egui::Color32::from_rgb(255, 59, 48)
+                };
+                ui.colored_label(color, &snap.message);
+                ui.add_space(8.0);
+            }
+
+            if snap.locked {
+                if snap.unlock_mode {
+                    ui.label("输入密码解锁");
+                    let dots = "●".repeat(snap.password_len);
+                    ui.label(egui::RichText::new(dots).size(24.0).monospace());
+                    ui.add_space(8.0);
+                } else {
+                    ui.label("连按3次 CapsLock 解锁");
+                }
+
+                if ui.button("强制解锁（UI）").clicked() {
+                    self.engine.send(UiCmd::Unlock);
+                }
+            } else {
+                if ui.button("锁定系统").clicked() {
+                    self.engine.send(UiCmd::Lock);
+                }
+
+                ui.add_space(8.0);
+                if ui.button("修改密码").clicked() {
+                    self.show_change = !self.show_change;
+                }
+
+                if self.show_change {
+                    ui.group(|ui| {
+                        ui.label("当前密码");
+                        ui.add(egui::TextEdit::singleline(&mut self.old_password).password(true));
+                        ui.label("新密码");
+                        ui.add(egui::TextEdit::singleline(&mut self.new_password).password(true));
+                        ui.label("确认新密码");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.confirm_password).password(true),
+                        );
+                        if ui.button("确认修改").clicked() {
+                            if self.new_password != self.confirm_password {
+                                tracing::warn!("Password mismatch");
+                            } else {
+                                self.engine.send(UiCmd::ChangePassword {
+                                    old: self.old_password.clone(),
+                                    new: self.new_password.clone(),
+                                });
+                            }
+                            self.old_password.clear();
+                            self.new_password.clear();
+                            self.confirm_password.clear();
+                        }
+                    });
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.label(format!("事件目录: {}", snap.events_dir.display()));
+        });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.engine.send(UiCmd::Exit);
+    }
+}
