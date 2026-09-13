@@ -1,0 +1,24 @@
+#!/bin/sh
+# pre-commit hook: repository guards on staged files.
+#
+# Checks (rules in AGENTS.md「文档怎么写」「Guardrails」):
+#   - Markdown: relative links exist, code fences are labelled, prose width <= 100.
+#   - Source/scripts: staged added lines width <= 100.
+#   - Policy: credential files and private key material are never committed.
+#
+# Install: git config core.hooksPath .githooks   (local config, not propagated)
+# Manual:  cargo run --quiet --manifest-path tools/guard/Cargo.toml -- --staged
+# Bypass:  git commit --no-verify (only for a broken guard, not for violations)
+
+command -v cargo >/dev/null 2>&1 || {
+    echo "✗ 提交被 pre-commit 钩子拒绝：未找到 cargo，无法运行仓库守卫。" >&2
+    echo "  安装 rustup 后重试；钩子实现见 tools/guard/。" >&2
+    exit 1
+}
+
+if ! cargo run --quiet --manifest-path tools/guard/Cargo.toml -- --staged; then
+    echo "✗ 提交被 pre-commit 钩子拒绝：仓库守卫未通过，请修复后重新 git add 再提交。" >&2
+    exit 1
+fi
+
+exit 0

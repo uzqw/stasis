@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+**/target/
+
+# Local session / tooling state
+.pi-web/
+*.bak-*
+
+# OS noise
+.DS_Store

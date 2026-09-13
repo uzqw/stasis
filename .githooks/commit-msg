@@ -1,0 +1,102 @@
+#!/bin/sh
+# commit-msg hook: enforce the commit message contract in CONTRIBUTING.md.
+#
+# Rules:
+#   1. Subject is `type(scope): summary` or `type: summary`, type from commit-lint.txt.
+#   2. Subject and body items start with a verb from commit-lint.txt.
+#   3. Commit text is English only (printable ASCII); comments and trailers exempt.
+#   4. Subject summary <= 50 chars, body item lines <= 72 chars.
+#
+# Install: git config core.hooksPath .githooks   (local config, not propagated)
+# Table:   .githooks/commit-lint.txt is the single source of truth.
+# Bypass:  git commit --no-verify (fix the message instead where possible).
+
+fail() {
+    echo "✗ 提交被 commit-msg 钩子拒绝：" >&2
+    echo "  $1" >&2
+    echo "  规则与动词表见 CONTRIBUTING.md；表文件 .githooks/commit-lint.txt。" >&2
+    exit 1
+}
+
+msg_file=$1
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || { echo "usage: commit-msg <msg-file>" >&2; exit 1; }
+
+table="$(dirname "$0")/commit-lint.txt"
+[ -f "$table" ] || fail "缺少动词表 $table"
+
+is_type() {
+    awk -v want="$1" '$1 == "type" && $2 == want { found = 1 } END { exit !found }' "$table"
+}
+
+is_verb() {
+    awk -v want="$1" '$1 == "verb" && $2 == want { found = 1 } END { exit !found }' "$table"
+}
+
+# First word of a line, lowercased for the verb check.
+first_word() {
+    printf '%s' "$1" | sed -E 's/^([^ ]+).*/\1/' | tr 'A-Z' 'a-z'
+}
+
+# Commit text must be printable ASCII (English only).
+is_ascii() {
+    case "$1" in
+        *[!\ -~]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Reject CJK/full-width text early: the most likely mistake.
+has_cjk() {
+    printf '%s' "$1" | LC_ALL=C grep -q '[^ -~]'
+}
+
+check_item() {
+    label=$1
+    text=$2
+    [ -n "$text" ] || return 0
+    has_cjk "$text" && fail "$label 必须使用英文：$(printf '%s' "$text" | cut -c1-60)"
+    word=$(first_word "$text")
+    is_verb "$word" || fail "$label 首词不是动词表内的英文动词：$(printf '%s' "$text" | cut -c1-60)"
+    return 0
+}
+
+# ---- subject ----
+subject=$(sed -n '1p' "$msg_file")
+[ -n "$subject" ] || fail "提交标题为空"
+[ "${#subject}" -le 200 ] || fail "提交标题过长"
+
+head=$(printf '%s' "$subject" | sed -E 's/^([a-z]+)(\([^)]*\))?: .*/\1/')
+[ "$head" != "$subject" ] || fail "标题格式应为 <type>(<scope>): <summary>，且 type 与冒号后有空行：$(printf '%s' "$subject" | cut -c1-60)"
+is_type "$head" || fail "未知 type \"$head\"（允许值见 CONTRIBUTING.md）"
+
+summary=$(printf '%s' "$subject" | sed -E 's/^[a-z]+(\([^)]*\))?: //')
+[ -n "$summary" ] || fail "标题缺少摘要"
+has_cjk "$summary" && fail "标题摘要必须使用英文：$(printf '%s' "$summary" | cut -c1-60)"
+[ "$(printf '%s' "$summary" | wc -m | tr -d ' ')" -le 50 ] \
+    || fail "标题摘要超过 50 字符：$(printf '%s' "$summary" | cut -c1-60)"
+check_item "标题摘要" "$summary"
+
+# ---- body ----
+exec 3< "$msg_file"
+lineno=0
+while IFS= read -r line <&3; do
+    lineno=$((lineno + 1))
+    [ "$lineno" -eq 1 ] && continue
+    case "$line" in
+        ''|'#'*) continue ;;
+        'Generated-by:'*|'Co-authored-by:'*|'Signed-off-by:'*|'Refs'*|'Fixes'*) continue ;;
+        ' '*) continue ;; # indented continuation lines are free text
+    esac
+    case "$line" in
+        '-'*|'*'*)
+            item=$(printf '%s' "$line" | sed -E 's/^[-*][[:space:]]*//')
+            [ -n "$item" ] || continue
+            [ "$(printf '%s' "$item" | wc -m | tr -d ' ')" -le 72 ] \
+                || fail "正文子项超过 72 字符：$(printf '%s' "$item" | cut -c1-60)"
+            check_item "正文子项" "$item"
+            ;;
+    esac
+done
+exec 3<&-
+
+exit 0
