@@ -33,6 +33,9 @@ fn main() {
             Ok(stasis::platform::BackendEvent::ShiftRelease) => {
                 keypad.shift_release();
             }
+            Ok(stasis::platform::BackendEvent::Health(msg)) => {
+                println!("[HEALTH] {}", msg);
+            }
             Ok(stasis::platform::BackendEvent::Released) => {
                 println!("[BACKEND RELEASED]");
                 break;

@@ -16,18 +16,38 @@ enum DeviceKind {
     Pointer,
 }
 
+/// Heuristic: skip known virtual/input-method devices to avoid breaking
+/// fcitx/ibus on Wayland. These create uinput virtual keyboards that
+/// must remain ungrabbed for composed input to work.
+fn is_ime_virtual(dev: &evdev::Device) -> bool {
+    let Some(name) = dev.name() else { return false };
+    let lower = name.to_lowercase();
+    lower.contains("fcitx")
+        || lower.contains("ibus")
+        || lower.contains("input method")
+        || lower.contains("uinput")
+}
+
 fn classify(dev: &evdev::Device) -> Option<DeviceKind> {
     let keys = dev.supported_keys()?;
-    let rel = dev.supported_relative_axes();
-    let abs = dev.supported_absolute_axes();
-    if keys.contains(evdev::KeyCode::KEY_A) && keys.contains(evdev::KeyCode::KEY_Z) {
+    // Broader keyboard detection: look for common typing keys.
+    let has_typing_keys = keys.contains(evdev::KeyCode::KEY_A)
+        && keys.contains(evdev::KeyCode::KEY_Z)
+        && keys.contains(evdev::KeyCode::KEY_SPACE)
+        && keys.contains(evdev::KeyCode::KEY_ENTER);
+    if has_typing_keys {
         return Some(DeviceKind::Keyboard);
     }
-    if keys.contains(evdev::KeyCode::BTN_LEFT)
+    // Pointer detection: buttons or axes.
+    let has_pointer = keys.contains(evdev::KeyCode::BTN_LEFT)
         || keys.contains(evdev::KeyCode::BTN_TOUCH)
-        || rel.is_some_and(|r| r.contains(evdev::RelativeAxisCode::REL_X))
-        || abs.is_some_and(|a| a.contains(evdev::AbsoluteAxisCode::ABS_X))
-    {
+        || dev
+            .supported_relative_axes()
+            .is_some_and(|r| r.contains(evdev::RelativeAxisCode::REL_X))
+        || dev
+            .supported_absolute_axes()
+            .is_some_and(|a| a.contains(evdev::AbsoluteAxisCode::ABS_X));
+    if has_pointer {
         return Some(DeviceKind::Pointer);
     }
     None
@@ -40,6 +60,9 @@ fn open_and_grab_all() -> anyhow::Result<HashMap<PathBuf, evdev::Device>> {
         anyhow::bail!("no input devices found (need input group or root)");
     }
     for (path, mut dev) in devices {
+        if is_ime_virtual(&dev) {
+            continue;
+        }
         if classify(&dev).is_none() {
             continue;
         }
@@ -74,20 +97,37 @@ fn raw_from_evdev(code: u16) -> Option<RawKey> {
     }
 }
 
-fn scan_new(grabbed: &mut HashMap<PathBuf, evdev::Device>) {
+/// Scan for newly plugged devices. Returns newly-grabbed paths and errors.
+fn scan_new(grabbed: &mut HashMap<PathBuf, evdev::Device>) -> (Vec<PathBuf>, Vec<String>) {
+    let mut added = Vec::new();
+    let mut errors = Vec::new();
     for (path, mut dev) in evdev::enumerate() {
         if grabbed.contains_key(&path) {
+            continue;
+        }
+        if is_ime_virtual(&dev) {
             continue;
         }
         if classify(&dev).is_none() {
             continue;
         }
-        if dev.grab().is_err() {
+        if let Err(e) = dev.grab() {
+            errors.push(format!("cannot grab new device {}: {}", path.display(), e));
             continue;
         }
-        let _ = dev.set_nonblocking(true);
+        if let Err(e) = dev.set_nonblocking(true) {
+            errors.push(format!(
+                "cannot set nonblocking on new device {}: {}",
+                path.display(),
+                e
+            ));
+            let _ = dev.ungrab();
+            continue;
+        }
+        added.push(path.clone());
         grabbed.insert(path, dev);
     }
+    (added, errors)
 }
 
 pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
@@ -128,7 +168,12 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(_) => {
+                    Err(e) => {
+                        let _ = tx.send(BackendEvent::Health(format!(
+                            "device {} error: {}",
+                            path.display(),
+                            e
+                        )));
                         to_remove.push(path.clone());
                     }
                 }
@@ -143,7 +188,10 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
 
             if last_scan.elapsed() >= Duration::from_secs(2) {
                 last_scan = Instant::now();
-                scan_new(&mut devices);
+                let (_added, errors) = scan_new(&mut devices);
+                for err in errors {
+                    let _ = tx.send(BackendEvent::Health(err));
+                }
             }
 
             thread::sleep(Duration::from_millis(50));

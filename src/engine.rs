@@ -297,6 +297,12 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                     Ok(BackendEvent::ShiftRelease) => {
                         keypad.shift_release();
                     }
+                    Ok(BackendEvent::Health(msg)) => {
+                        update(&snapshot, |s| {
+                            s.message = msg;
+                            s.ok = false;
+                        });
+                    }
                     Ok(BackendEvent::Released) | Err(_) => {
                         // Backend died or was stopped
                         if backend.is_locked() {

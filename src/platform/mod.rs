@@ -16,6 +16,8 @@ pub enum BackendEvent {
     ShiftRelease,
     /// The grab has ended (device lost, error, or stopped).
     Released,
+    /// Non-fatal health report from the backend (e.g. hot-plug failure).
+    Health(String),
 }
 
 /// Handle to an active grab.  Dropping it releases input.
