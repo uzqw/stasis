@@ -5,8 +5,9 @@ Stasis：**Pause the machine. Rest the human.** —— 暂停键盘鼠标输入�
 ## 项目概述
 
 Rust 重写项目，设计与实施计划见 [docs/design.md](docs/design.md)、
-[docs/implementation-plan.md](docs/implementation-plan.md)。当前处于实现前阶段：仓库内只有文档、
-守卫工具和钩子，尚无 Cargo package 与可运行程序。
+[docs/implementation-plan.md](docs/implementation-plan.md)。仓库已含可编译的 Rust 实现（`src/`）：
+Linux 后端已在授权真实桌面验证，Windows/macOS 后端尚未实现。验证状态以
+[README.md](README.md) 为准。
 
 原 Python 版 `../input-locker` 保留使用，不在本仓库内改动。
 
@@ -14,6 +15,8 @@ Rust 重写项目，设计与实施计划见 [docs/design.md](docs/design.md)、
 
 | 路径 | 内容 |
 | --- | --- |
+| `src/` | Rust 实现：config、engine、session、protocol、keypad、keymap、ui、platform |
+| `examples/` | 手动验证用的真机测试程序（grab/unlock，需授权环境） |
 | `docs/` | 设计、实施计划、ADR；索引见 [docs/README.md](docs/README.md) |
 | `docs/adr/` | 关键决策记录（架构、协议、平台取舍） |
 | `tools/guard/` | 仓库守卫（文档、行宽、凭据），零依赖 Rust 二进制 |
