@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
+#[cfg(not(test))]
+use std::thread;
+use std::time::Duration;
+#[cfg(not(test))]
+use crossbeam_channel::bounded;
+
 pub const SCHEMA: &str = "input-locker.event/v1";
 pub const REQUESTED: &str = "rest.requested";
 pub const LOCKED: &str = "rest.locked";
@@ -62,6 +68,8 @@ impl Event {
     }
 }
 
+const MAX_READ_BATCH: usize = 500;
+
 /// Event file store (requests + results).
 pub struct EventStore {
     root: PathBuf,
@@ -96,6 +104,34 @@ impl EventStore {
         out
     }
 
+    /// Read events with a timeout to prevent blocking the engine thread
+    /// indefinitely on slow or unresponsive storage.
+    #[cfg(not(test))]
+    pub fn events_nonblocking(&self, timeout: Duration) -> Vec<Event> {
+        let root = self.root.clone();
+        let (tx, rx) = bounded(1);
+        thread::spawn(move || {
+            let store = EventStore::new(&root);
+            let _ = tx.send(store.events());
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(events) => events,
+            Err(_) => {
+                tracing::warn!(
+                    "EventStore::events() timed out after {:?} on {}; returning empty",
+                    timeout,
+                    self.root.display()
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn events_nonblocking(&self, _timeout: Duration) -> Vec<Event> {
+        self.events()
+    }
+
     fn read_dir(&self, dir: &Path) -> Vec<Event> {
         let mut out = Vec::new();
         let Ok(entries) = fs::read_dir(dir) else {
@@ -103,6 +139,18 @@ impl EventStore {
         };
         let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
         paths.sort();
+
+        let total = paths.len();
+        if total > MAX_READ_BATCH {
+            tracing::warn!(
+                "event directory {} contains {} files; limiting to last {}",
+                dir.display(),
+                total,
+                MAX_READ_BATCH
+            );
+            paths = paths.split_off(total - MAX_READ_BATCH);
+        }
+
         for path in paths {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;

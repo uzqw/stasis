@@ -248,7 +248,13 @@ impl Controller {
     }
 
     pub fn sessions(&self, now: DateTime<Utc>) -> HashMap<String, Session> {
-        project(&self.store.events(), now)
+        #[cfg(test)]
+        let events = self.store.events();
+        #[cfg(not(test))]
+        let events = self
+            .store
+            .events_nonblocking(std::time::Duration::from_secs(2));
+        project(&events, now)
     }
 
     /// Tick the schedule.  Returns zero or more status messages.
