@@ -134,6 +134,14 @@ impl Keypad {
         self.caps_times.clear();
     }
 
+    /// Call when the input device is lost or backend exits unexpectedly.
+    /// Clears transient state (shift, caps tracking) but preserves password
+    /// and unlock mode so the user can continue after reconnect.
+    pub fn device_lost(&mut self) {
+        self.shift_down = false;
+        self.caps_times.clear();
+    }
+
     fn push(&mut self, ch: char) {
         if self.password.len() < PASSWORD_MAX_LEN {
             self.password.push(ch);
@@ -268,5 +276,41 @@ mod tests {
             k.feed(now, RawKey::Letter('a'));
         }
         assert_eq!(k.password().len(), PASSWORD_MAX_LEN);
+    }
+
+    #[test]
+    fn device_lost_clears_shift_and_caps() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        k.feed(now, RawKey::ShiftLeft);
+        assert!(k.shift_down);
+        k.feed(now + Duration::from_millis(100), RawKey::CapsLock);
+        assert!(!k.caps_times.is_empty());
+
+        k.device_lost();
+        assert!(!k.shift_down);
+        assert!(k.caps_times.is_empty());
+        // unlock_mode and password should survive
+        assert!(!k.is_unlock_mode()); // not armed yet
+        assert!(k.password().is_empty());
+    }
+
+    #[test]
+    fn device_lost_preserves_unlock_mode_and_password() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        for i in 0..3 {
+            k.feed(
+                now + Duration::from_millis(i as u64 * 300),
+                RawKey::CapsLock,
+            );
+        }
+        k.feed(now, RawKey::Letter('x'));
+        assert!(k.is_unlock_mode());
+        assert_eq!(k.password(), "x");
+
+        k.device_lost();
+        assert!(k.is_unlock_mode());
+        assert_eq!(k.password(), "x");
     }
 }

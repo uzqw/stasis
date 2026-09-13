@@ -115,7 +115,13 @@ impl EventStore {
         out
     }
 
+    const MAX_EVENT_SIZE: u64 = 1024 * 1024; // 1 MiB
+
     fn read_one(path: &Path) -> anyhow::Result<Event> {
+        let meta = fs::metadata(path)?;
+        if meta.len() > Self::MAX_EVENT_SIZE {
+            anyhow::bail!("event file too large ({} bytes)", meta.len());
+        }
         let text = fs::read_to_string(path)?;
         Ok(serde_json::from_str(&text)?)
     }
@@ -201,6 +207,31 @@ pub fn poll_command(
     let dir = dir.as_ref();
     let cmd_path = dir.join("input-locker-command.json");
     let processing = dir.join("input-locker-command.json.processing");
+
+    // Crash recovery: stale .processing from a previous crash
+    if processing.exists() {
+        let text = fs::read_to_string(&processing).unwrap_or_default();
+        if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
+            let (result, error) = match handler(&cmd) {
+                Ok(r) => (r, None),
+                Err(e) => ("error".into(), Some(e.to_string())),
+            };
+            let ack = Ack {
+                cmd: cmd.cmd.clone(),
+                id: cmd.id.clone(),
+                result,
+                error,
+                ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            };
+            let ack_path = dir.join("input-locker-ack.json");
+            let tmp = dir.join(".tmp-ack.json");
+            if fs::write(&tmp, serde_json::to_string_pretty(&ack)?).is_ok() {
+                let _ = fs::rename(&tmp, &ack_path);
+            }
+        }
+        let _ = fs::remove_file(&processing);
+        return Ok(());
+    }
 
     // Atomic claim
     match fs::rename(&cmd_path, &processing) {
@@ -305,5 +336,62 @@ mod tests {
     fn command_not_found_is_noop() {
         let tmp = TempDir::new().unwrap();
         poll_command(tmp.path(), |_cmd| Ok("ok".into())).unwrap();
+    }
+
+    #[test]
+    fn processing_crash_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        fs::write(
+            dir.join("input-locker-command.json.processing"),
+            r#"{"cmd":"lock","id":"crash1"}"#,
+        )
+        .unwrap();
+
+        poll_command(dir, |cmd| {
+            assert_eq!(cmd.id, "crash1");
+            Ok("recovered".into())
+        })
+        .unwrap();
+
+        let ack_text = fs::read_to_string(dir.join("input-locker-ack.json")).unwrap();
+        let ack: Ack = serde_json::from_str(&ack_text).unwrap();
+        assert_eq!(ack.id, "crash1");
+        assert_eq!(ack.result, "recovered");
+        assert!(!dir.join("input-locker-command.json.processing").exists());
+    }
+
+    #[test]
+    fn oversized_event_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.requests_dir()).unwrap();
+        let big = "x".repeat(2 * 1024 * 1024);
+        let payload = format!(
+            r#"{{"schema":"input-locker.event/v1","eventId":"e1",\
+"sessionId":"s1","type":"rest.requested","recordedAt":\
+"2026-09-08T03:00:00Z","data":{{"big":"{big}"}}}}"#,
+        );
+        fs::write(store.requests_dir().join("huge.json"), payload).unwrap();
+        let evs = store.events();
+        assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn bad_schema_event_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.requests_dir()).unwrap();
+        // Type error in a core field: "eventId" as number instead of string.
+        fs::write(
+            store.requests_dir().join("type_err.json"),
+            r#"{"schema":"input-locker.event/v1","eventId":123,\
+"sessionId":"s1","type":"rest.requested","recordedAt":\
+"2026-09-08T03:00:00Z","data":{}}"#,
+        )
+        .unwrap();
+        let evs = store.events();
+        // Fails deserialization and is silently skipped
+        assert!(evs.is_empty());
     }
 }

@@ -31,6 +31,11 @@ impl Grab {
             .map(|h| !h.is_finished())
             .unwrap_or(false)
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_mock(stop: Arc<AtomicBool>, handle: Option<JoinHandle<()>>) -> Self {
+        Self { stop, handle }
+    }
 }
 
 impl Drop for Grab {

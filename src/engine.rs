@@ -64,6 +64,13 @@ impl BackendHandle {
             _keepawake: None,
         }
     }
+
+    fn grab_alive(&self) -> bool {
+        match &self.state {
+            BackendState::Locked { _grab, .. } => _grab.is_alive(),
+            _ => false,
+        }
+    }
 }
 
 impl LockOps for BackendHandle {
@@ -216,6 +223,21 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 // dropping `oper` without `recv` panics in crossbeam.
                 let _ = oper.recv(&tick_rx);
                 let now = Utc::now();
+
+                // Backend health check: if grab thread died without sending Released,
+                // transition out of locked state so the UI is not stuck.
+                if backend.is_locked() && !backend.grab_alive() {
+                    let _ = backend.stop_lock();
+                    keypad.device_lost();
+                    update(&snapshot, |s| {
+                        s.locked = false;
+                        s.unlock_mode = false;
+                        s.password_len = 0;
+                        s.message = "输入后端异常退出".into();
+                        s.ok = false;
+                    });
+                }
+
                 let msgs = controller.tick(&mut backend, now);
                 for (msg, ok) in msgs {
                     update(&snapshot, |s| {
@@ -279,6 +301,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         // Backend died or was stopped
                         if backend.is_locked() {
                             let _ = backend.stop_lock();
+                            keypad.device_lost();
                             update(&snapshot, |s| {
                                 s.locked = false;
                                 s.unlock_mode = false;
@@ -364,4 +387,50 @@ where
 /// Manual unlock shows a clear UI message; rest-session facts live in events.
 fn unlock_display(ok: bool, msg: String) -> String {
     if ok { "已成功解锁".into() } else { msg }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::Grab;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn backend_handle_grab_alive_true_while_running() {
+        let (_tx, rx) = unbounded();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let handle = thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let grab = Grab::new_mock(stop, Some(handle));
+        let mut backend = BackendHandle::new();
+        backend.state = BackendState::Locked { _grab: grab, rx };
+        assert!(backend.grab_alive());
+        backend.stop_lock().ok();
+    }
+
+    #[test]
+    fn backend_handle_grab_alive_false_after_finish() {
+        let (_tx, rx) = unbounded();
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(|| {});
+        // Wait for thread to finish
+        thread::sleep(Duration::from_millis(50));
+        let grab = Grab::new_mock(stop, Some(handle));
+        let mut backend = BackendHandle::new();
+        backend.state = BackendState::Locked { _grab: grab, rx };
+        assert!(!backend.grab_alive());
+        backend.stop_lock().ok();
+    }
+
+    #[test]
+    fn unlock_display_ok() {
+        assert_eq!(unlock_display(true, "ignored".into()), "已成功解锁");
+        assert_eq!(unlock_display(false, "error".into()), "error");
+    }
 }

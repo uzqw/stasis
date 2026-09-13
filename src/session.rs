@@ -280,14 +280,30 @@ impl Controller {
             if !locker.is_locked() {
                 if now < s.unlock_at {
                     if locker.start_lock().is_ok() {
-                        let _ = self.store.emit_result(
+                        match self.store.emit_result(
                             &s.session_id,
                             LOCKED,
                             json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
                             now,
                             None,
-                        );
-                        out.push(("计划休息已恢复锁定".into(), true));
+                        ) {
+                            Ok(_) => out.push(("计划休息已恢复锁定".into(), true)),
+                            Err(_) => {
+                                let _ = locker.stop_lock();
+                                let _ = self.store.emit_result(
+                                    &s.session_id,
+                                    FAILED,
+                                    json!({
+                                        "action": "lock",
+                                        "error": "event write failed",
+                                        "retryable": true,
+                                    }),
+                                    now,
+                                    None,
+                                );
+                                out.push(("计划休息锁定失败".into(), false));
+                            }
+                        }
                     } else {
                         let _ = self.store.emit_result(
                             &s.session_id,
@@ -336,21 +352,38 @@ impl Controller {
             }
 
             if now >= s.unlock_at {
-                if locker.stop_lock().is_ok() {
-                    let _ = self.store.emit_result(
-                        &s.session_id,
-                        UNLOCKED,
-                        json!({
-                            "unlockedAt": iso(now),
-                            "lockedThrough": iso(now),
-                            "reason": "scheduled",
-                        }),
-                        now,
-                        None,
-                    );
-                    out.push(("计划休息完成".into(), true));
-                } else {
-                    out.push(("计划休息解锁失败，正在重试".into(), false));
+                match self.store.emit_result(
+                    &s.session_id,
+                    UNLOCKED,
+                    json!({
+                        "unlockedAt": iso(now),
+                        "lockedThrough": iso(now),
+                        "reason": "scheduled",
+                    }),
+                    now,
+                    None,
+                ) {
+                    Ok(_) => {
+                        if locker.stop_lock().is_ok() {
+                            out.push(("计划休息完成".into(), true));
+                        } else {
+                            let _ = self.store.emit_result(
+                                &s.session_id,
+                                FAILED,
+                                json!({
+                                    "action": "unlock",
+                                    "error": "stop_lock failed",
+                                    "retryable": true,
+                                }),
+                                now,
+                                None,
+                            );
+                            out.push(("计划休息解锁失败，正在重试".into(), false));
+                        }
+                    }
+                    Err(_) => {
+                        out.push(("计划休息解锁失败，正在重试".into(), false));
+                    }
                 }
             }
         }
@@ -367,14 +400,30 @@ impl Controller {
                 continue;
             }
             if locker.start_lock().is_ok() {
-                let _ = self.store.emit_result(
+                match self.store.emit_result(
                     &s.session_id,
                     LOCKED,
                     json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
                     now,
                     None,
-                );
-                out.push(("计划休息已锁定".into(), true));
+                ) {
+                    Ok(_) => out.push(("计划休息已锁定".into(), true)),
+                    Err(_) => {
+                        let _ = locker.stop_lock();
+                        let _ = self.store.emit_result(
+                            &s.session_id,
+                            FAILED,
+                            json!({
+                                "action": "lock",
+                                "error": "event write failed",
+                                "retryable": true,
+                            }),
+                            now,
+                            None,
+                        );
+                        out.push(("计划休息锁定失败".into(), false));
+                    }
+                }
             } else {
                 let _ = self.store.emit_result(
                     &s.session_id,
@@ -410,22 +459,34 @@ impl Controller {
             }
         }
         let session = &active[0];
-        match locker.stop_lock() {
-            Ok(()) => {
-                let _ = self.store.emit_result(
-                    &session.session_id,
-                    UNLOCKED,
-                    json!({"unlockedAt": iso(now), "lockedThrough": iso(now), "reason": reason}),
-                    now,
-                    None,
-                );
-                let msg = if reason == "password" {
-                    "休息提前结束"
-                } else {
-                    "计划休息已解锁"
-                };
-                (true, msg.into())
-            }
+        // Emit event before physical unlock to prevent re-lock on restart
+        match self.store.emit_result(
+            &session.session_id,
+            UNLOCKED,
+            json!({"unlockedAt": iso(now), "lockedThrough": iso(now), "reason": reason}),
+            now,
+            None,
+        ) {
+            Ok(_) => match locker.stop_lock() {
+                Ok(()) => {
+                    let msg = if reason == "password" {
+                        "休息提前结束"
+                    } else {
+                        "计划休息已解锁"
+                    };
+                    (true, msg.into())
+                }
+                Err(_) => {
+                    let _ = self.store.emit_result(
+                        &session.session_id,
+                        FAILED,
+                        json!({"action": "unlock", "error": "stop_lock failed", "retryable": true}),
+                        now,
+                        None,
+                    );
+                    (false, "解锁失败，请重试".into())
+                }
+            },
             Err(_) => (false, "解锁失败，请重试".into()),
         }
     }
@@ -438,6 +499,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     struct FakeLocker {
@@ -598,5 +660,114 @@ mod tests {
         // phase stays waiting because retryable
         let sessions = ctrl.sessions(base());
         assert_eq!(sessions["s1"].phase, Phase::Waiting);
+    }
+
+    #[test]
+    fn overlapping_requests_are_serialized() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        request(&ctrl.store, "s2", 0, 10);
+
+        let msgs = ctrl.tick(&mut locker, base());
+        // Only one should lock because locker.is_locked() prevents re-lock
+        let lock_count = msgs.iter().filter(|(m, _)| m == "计划休息已锁定").count();
+        assert_eq!(lock_count, 1);
+        assert!(locker.is_locked());
+    }
+
+    #[test]
+    fn event_write_failure_rolls_back_lock() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        // Make results dir read-only so emit_result fails
+        fs::create_dir_all(store.results_dir()).unwrap();
+        let mut perms = fs::metadata(store.results_dir()).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(store.results_dir(), perms.clone()).unwrap();
+
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        let msgs = ctrl.tick(&mut locker, base());
+
+        // Restore permissions for cleanup
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(ctrl.store.results_dir())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(ctrl.store.results_dir(), perms);
+        }
+
+        assert!(msgs.iter().any(|(m, _)| m == "计划休息锁定失败"));
+        assert!(!locker.is_locked());
+    }
+
+    #[test]
+    fn unlock_emits_event_before_physical_stop() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        let (ok, msg) = ctrl.unlock(&mut locker, "password", base() + Duration::seconds(1));
+        assert!(ok);
+        assert_eq!(msg, "休息提前结束");
+        assert!(!locker.is_locked());
+
+        // Verify UNLOCKED event was written
+        let events = ctrl.store.events();
+        let unlocked_ev = events.iter().find(|e| e.kind == UNLOCKED);
+        assert!(unlocked_ev.is_some());
+    }
+
+    #[test]
+    fn restart_does_not_relock_after_password_unlock() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        ctrl.unlock(&mut locker, "password", base() + Duration::seconds(1));
+        assert!(!locker.is_locked());
+
+        // Simulate restart
+        let mut locker2 = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl2 = Controller::new(EventStore::new(tmp.path()));
+        let msgs = ctrl2.tick(&mut locker2, base() + Duration::minutes(1));
+        assert!(!locker2.is_locked());
+        assert!(!msgs.iter().any(|(m, _)| m == "计划休息已恢复锁定"));
     }
 }
