@@ -212,6 +212,9 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 Ok(UiCmd::Exit) | Err(_) => break,
             },
             i if i == tick_idx => {
+                // Complete the selected operation before handling it;
+                // dropping `oper` without `recv` panics in crossbeam.
+                let _ = oper.recv(&tick_rx);
                 let now = Utc::now();
                 let msgs = controller.tick(&mut backend, now);
                 for (msg, ok) in msgs {
