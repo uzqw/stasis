@@ -340,6 +340,7 @@ fn handle_keypad_action(
 ) {
     match action {
         Action::UnlockMode => {
+            tracing::info!("unlock mode armed by gesture");
             update(snapshot, |s| {
                 s.unlock_mode = true;
                 s.password_len = 0;
@@ -362,7 +363,7 @@ fn handle_keypad_action(
                 update(snapshot, |s| {
                     s.unlock_mode = false;
                     s.password_len = 0;
-                    s.message = "密码错误 — 连按3次 CapsLock 重新解锁".into();
+                    s.message = "密码错误 — 连按3次 j 重新解锁".into();
                     s.ok = false;
                 });
             }

@@ -31,7 +31,12 @@ const CJK_FONTS: &[(&str, u32)] = &[
 
 /// Install a system CJK font as a fallback and switch to the light theme.
 /// Without this, Chinese labels render as tofu boxes.
+///
+/// The theme is *pinned*: leaving the preference on `System` lets egui re-resolve
+/// the desktop theme while we also force light visuals, which repaints the same
+/// window with two different palettes.
 pub fn install_style(ctx: &egui::Context) {
+    ctx.set_theme(egui::ThemePreference::Light);
     ctx.set_visuals(egui::Visuals::light());
 
     let Some((path, index)) = CJK_FONTS
@@ -68,6 +73,7 @@ pub struct App {
     confirm_password: String,
     show_change: bool,
     last_focus: u64,
+    on_top: bool,
 }
 
 impl App {
@@ -81,12 +87,19 @@ impl App {
             confirm_password: String::new(),
             show_change: false,
             last_focus: 0,
+            on_top: false,
         }
     }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The engine runs on another thread and the lock swallows every input
+        // event, so egui gets nothing to react to: without an explicit repaint
+        // request the window keeps showing a stale frame (armed gesture, dots,
+        // error messages all invisible). Poll the snapshot at 10 Hz instead.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
         let snap = self.snapshot.lock().unwrap().clone();
 
         if snap.focus_request != self.last_focus {
@@ -97,10 +110,16 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        if !snap.locked {
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                egui::WindowLevel::Normal,
-            ));
+        // Only touch the window level when it actually changes: sending a
+        // viewport command on every frame forces a repaint loop.
+        if snap.locked != self.on_top {
+            self.on_top = snap.locked;
+            let level = if snap.locked {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && snap.locked {
@@ -108,7 +127,25 @@ impl eframe::App for App {
         }
     }
 
+    /// Opaque window background.  The eframe default is 180/255 alpha, which
+    /// lets the desktop (and the previous frame's leftovers) show through.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.window_fill().to_normalized_gamma_f32()
+    }
+
+    // `eframe` hands `ui` a bare `Ui` with no margin and no background; the
+    // panel supplies both, otherwise text lands straight on an unpainted window.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| self.body(ui));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.engine.send(UiCmd::Exit);
+    }
+}
+
+impl App {
+    fn body(&mut self, ui: &mut egui::Ui) {
         let snap = self.snapshot.lock().unwrap().clone();
 
         ui.vertical_centered(|ui| {
@@ -140,7 +177,7 @@ impl eframe::App for App {
                     ui.label(egui::RichText::new(dots).size(24.0).monospace());
                     ui.add_space(8.0);
                 } else {
-                    ui.label("连按3次 CapsLock 解锁");
+                    ui.label("连按3次 j 解锁");
                 }
 
                 if ui.button("强制解锁（UI）").clicked() {
@@ -186,9 +223,5 @@ impl eframe::App for App {
             ui.add_space(12.0);
             ui.label(format!("事件目录: {}", snap.events_dir.display()));
         });
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.engine.send(UiCmd::Exit);
     }
 }

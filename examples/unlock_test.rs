@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 fn main() {
     eprintln!("Stasis unlock test: input grabbed NOW.");
-    eprintln!("1. Press CapsLock 3 times within 2 seconds");
+    eprintln!("1. Press j 3 times within 2 seconds");
     eprintln!("2. Type password: 123456");
     eprintln!("3. Press Enter");
     eprintln!("Auto-releases after 240s. Kill with: pkill -f unlock_test");
@@ -35,7 +35,7 @@ fn main() {
                             unlocked = true;
                             break;
                         } else {
-                            eprintln!("[WRONG] Try again: CapsLock x3 then password.");
+                            eprintln!("[WRONG] Try again: j x3 then password.");
                             keypad.cancel_unlock_mode();
                         }
                     }
