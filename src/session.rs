@@ -138,13 +138,17 @@ pub fn project(events: &[Event], now: DateTime<Utc>) -> HashMap<String, Session>
                     .and_then(|v| v.as_str())
                     .and_then(parse_time)
                     .unwrap_or(s.updated_at);
+                // A heartbeat only extends the segment it belongs to.  It must
+                // not revive a session that already ended: a stale `rest.observed`
+                // delivered after `rest.unlocked` would otherwise flip the session
+                // back to Active and make the engine re-lock after every unlock.
                 if let Some(seg) = s.segments.last_mut()
                     && seg.unlocked_at.is_none()
                     && through > seg.locked_through
                 {
                     seg.locked_through = through;
+                    s.phase = Phase::Active;
                 }
-                s.phase = Phase::Active;
                 s.updated_at = parse_time(&ev.recorded_at).unwrap_or(now);
             }
             UNLOCKED => {
@@ -264,7 +268,19 @@ impl Controller {
         for s in active {
             if !locker.is_locked() {
                 if now < s.unlock_at {
+                    // A session whose last segment is still open continues that
+                    // segment.  Emitting another `rest.locked` here would invent a
+                    // new rest segment — and when the backend grab flaps, one such
+                    // event per tick.
+                    let open_segment = s
+                        .segments
+                        .last()
+                        .is_some_and(|seg| seg.unlocked_at.is_none());
                     if locker.start_lock().is_ok() {
+                        if open_segment {
+                            out.push(("计划休息已恢复锁定".into(), true));
+                            continue;
+                        }
                         match self.store.emit_result(
                             &s.session_id,
                             LOCKED,
@@ -834,5 +850,75 @@ mod tests {
             perms.set_mode(0o755);
             let _ = fs::set_permissions(ctrl.store.results_dir(), perms);
         }
+    }
+
+    #[test]
+    fn late_heartbeat_does_not_revive_an_ended_session() {
+        // Regression (2026-09-14): a `rest.observed` heartbeat arriving after
+        // the unlock flipped the session back to Active, so the engine re-locked
+        // one tick later and a manual unlock never stuck.
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        let (ok, _) = ctrl.unlock(&mut locker, "command", base() + Duration::seconds(1));
+        assert!(ok);
+        assert!(!locker.is_locked());
+
+        ctrl.store
+            .emit_result(
+                "s1",
+                OBSERVED,
+                json!({"lockedThrough": iso(base() + Duration::seconds(2))}),
+                base() + Duration::seconds(2),
+                None,
+            )
+            .unwrap();
+
+        let msgs = ctrl.tick(&mut locker, base() + Duration::seconds(3));
+        assert!(!locker.is_locked(), "ended session must not be re-locked");
+        assert!(!msgs.iter().any(|(m, _)| m == "计划休息已恢复锁定"));
+    }
+
+    #[test]
+    fn backend_flap_resumes_without_a_duplicate_lock_event() {
+        // Regression (2026-09-14): the grab backend kept dropping out of the
+        // locked state and each reconciliation wrote another `rest.locked`
+        // (8 events in 7 s). Resuming an open segment must not fabricate a new
+        // segment: at most one `rest.locked` per rest session.
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: false,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+
+        for secs in 1..=8 {
+            locker.locked = false; // backend flap: the grab died
+            let msgs = ctrl.tick(&mut locker, base() + Duration::seconds(secs));
+            assert!(locker.is_locked(), "lock must be resumed");
+            assert!(msgs.iter().any(|(m, _)| m == "计划休息已恢复锁定"));
+        }
+
+        let locks = ctrl
+            .store
+            .events()
+            .iter()
+            .filter(|e| e.kind == LOCKED)
+            .count();
+        assert_eq!(locks, 1, "resuming a lock must not emit a new rest.locked");
     }
 }
