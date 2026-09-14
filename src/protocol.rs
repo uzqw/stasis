@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -66,12 +67,16 @@ const MAX_READ_BATCH: usize = 500;
 /// Event file store (requests + results).
 pub struct EventStore {
     root: PathBuf,
+    /// Files dropped by the last capped read, so the warning fires on change
+    /// instead of once per tick (it is read ~1/s while locked).
+    truncated_at: AtomicUsize,
 }
 
 impl EventStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            truncated_at: AtomicUsize::new(0),
         }
     }
 
@@ -121,13 +126,17 @@ impl EventStore {
 
         let total = paths.len();
         if total > MAX_READ_BATCH {
-            tracing::warn!(
-                "event directory {} contains {} files; limiting to the newest {}",
-                dir.display(),
-                total,
-                MAX_READ_BATCH
-            );
-            paths.drain(..total - MAX_READ_BATCH);
+            let dropped = total - MAX_READ_BATCH;
+            if self.truncated_at.swap(dropped, Ordering::Relaxed) != dropped {
+                tracing::warn!(
+                    "event directory {} holds {} files; keeping the newest {} and dropping {}",
+                    dir.display(),
+                    total,
+                    MAX_READ_BATCH,
+                    dropped
+                );
+            }
+            paths.drain(..dropped);
         }
 
         for (_, path) in paths {
