@@ -225,6 +225,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 // Backend health check: if grab thread died without sending Released,
                 // transition out of locked state so the UI is not stuck.
                 if backend.is_locked() && !backend.grab_alive() {
+                    tracing::warn!("grab thread died without reporting a reason; releasing lock");
                     let _ = backend.stop_lock();
                     keypad.device_lost();
                     update(&snapshot, |s| {
@@ -295,6 +296,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         keypad.shift_release();
                     }
                     Ok(BackendEvent::Health(msg)) => {
+                        tracing::warn!("backend health: {}", msg);
                         update(&snapshot, |s| {
                             s.message = msg;
                             s.ok = false;
@@ -302,6 +304,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                     }
                     Ok(BackendEvent::Released) | Err(_) => {
                         // Backend died or was stopped
+                        tracing::warn!("backend exited; releasing lock if held");
                         if backend.is_locked() {
                             let _ = backend.stop_lock();
                             keypad.device_lost();

@@ -97,29 +97,40 @@ impl EventStore {
         out
     }
 
+    /// Read the newest valid events from one directory.
+    ///
+    /// Over-long directories are capped to the most recent [`MAX_READ_BATCH`]
+    /// files **by modification time**. Event filenames are random UUIDs, so a
+    /// cap by filename keeps an arbitrary half of the history: recent events
+    /// (including the one just written) may be invisible to projection, which
+    /// makes lock/unlock decisions nondeterministic.
     fn read_dir(&self, dir: &Path) -> Vec<Event> {
         let mut out = Vec::new();
         let Ok(entries) = fs::read_dir(dir) else {
             return out;
         };
-        let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        let mut paths: Vec<(std::time::SystemTime, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter_map(|e| {
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                Some((mtime, e.path()))
+            })
+            .collect();
         paths.sort();
 
         let total = paths.len();
         if total > MAX_READ_BATCH {
             tracing::warn!(
-                "event directory {} contains {} files; limiting to last {}",
+                "event directory {} contains {} files; limiting to the newest {}",
                 dir.display(),
                 total,
                 MAX_READ_BATCH
             );
-            paths = paths.split_off(total - MAX_READ_BATCH);
+            paths.drain(..total - MAX_READ_BATCH);
         }
 
-        for path in paths {
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
+        for (_, path) in paths {
             match Self::read_one(&path) {
                 Ok(ev) if ev.is_valid() => out.push(ev),
                 _ => {}
@@ -370,6 +381,34 @@ mod tests {
         fs::write(store.requests_dir().join("huge.json"), payload).unwrap();
         let evs = store.events();
         assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn newest_events_survive_the_batch_cap() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.results_dir()).unwrap();
+
+        // Fill the directory past the cap with older events.
+        let old = concat!(
+            r#"{"schema":"input-locker.event/v1","eventId":"old","sessionId":"s1","#,
+            r#""type":"rest.observed","recordedAt":"2026-09-08T03:00:00Z","data":{}}"#
+        );
+        for i in 0..MAX_READ_BATCH + 20 {
+            fs::write(store.results_dir().join(format!("{i:040}.json")), old).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // The event just written must be visible: filenames are random UUIDs in
+        // production, so a name-ordered cap would drop it at random.
+        let now = Utc::now();
+        store
+            .emit_result("s1", LOCKED, json!({}), now, None)
+            .unwrap();
+
+        let evs = store.events();
+        assert_eq!(evs.len(), MAX_READ_BATCH);
+        assert!(evs.iter().any(|e| e.kind == LOCKED));
     }
 
     #[test]
