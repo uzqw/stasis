@@ -15,6 +15,9 @@ Input Locker 的 Rust 重写项目：暂停键盘、鼠标输入，让人休息�
 Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到端验证；Windows 与 macOS 尚未实
 现，属于未来工作，不作为已验证能力声明。
 
+解锁手势（2026-09-14 起）为 **2 秒内连按 3 次 `j`**；下文 2026-09-13 记录中的 CapsLock×3 是当时的
+行为，已不再生效。
+
 - [设计方案](docs/design.md)：范围、跨平台行为、线程与资源模型、协议兼容、安全边界。
 - [实施与验收计划](docs/implementation-plan.md)：按可验证成果推进，不按代码量判定完成。
 - [决策记录](docs/adr/0001-rust-rewrite-shared-core.md)：为什么重写、为什么是共享核心结构。
@@ -49,6 +52,9 @@ cargo build --release
 需要 `input` 组权限以抓取 `/dev/input/event*`，密码规则为物理 US 键盘 ASCII 字母/数字。
 真实抓取属于高风险操作：仅在授权桌面运行，并先确认恢复通道（uinput 注入、`kill`、UI 强制解锁
 按钮）。
+
+排查输入/锁定问题时先看应用自己的日志：`~/.config/stasis/stasis.log.YYYY-MM-DD`（按 UTC 日期滚动，
+**不写 journald**）；需要更详细的等级时给进程设 `RUST_LOG=info`。
 
 新项目独立开发，原 `../input-locker` 保留使用。切换前不得让两个程序同时消费同一事件目录或抓取输
 入。
