@@ -2,9 +2,16 @@ use std::time::{Duration, Instant};
 
 use crate::keymap::RawKey;
 
-const CAPS_TRIGGER_COUNT: usize = 3;
-const CAPS_TRIGGER_WINDOW: Duration = Duration::from_secs(2);
+const TRIGGER_COUNT: usize = 3;
+const TRIGGER_WINDOW: Duration = Duration::from_secs(2);
 const PASSWORD_MAX_LEN: usize = 64;
+
+/// Unlock gesture key: press it [`TRIGGER_COUNT`] times within [`TRIGGER_WINDOW`].
+///
+/// `j` has exactly one physical key on every platform: no keypad twin and no
+/// modifier-flag ambiguity (macOS reports CapsLock through `flagsChanged`,
+/// where press and release are hard to tell apart).
+const TRIGGER_KEY: RawKey = RawKey::Letter('j');
 
 /// Actions produced by feeding raw keys into the keypad.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,13 +28,14 @@ pub enum Action {
 
 /// Shared keypad logic.  One instance per lock session.
 ///
-/// - Tracks CapsLock presses within a 2-second window.
-/// - Once armed (`unlock_mode = true`), builds a password buffer.
-/// - Shift state is tracked but CapsLock LED is ignored for password input.
+/// - Tracks [`TRIGGER_KEY`] presses within a 2-second window.
+/// - Once armed (`unlock_mode = true`), builds a password buffer; the trigger
+///   key is then an ordinary password character again.
+/// - Shift state is tracked; CapsLock is ignored entirely.
 /// - Only letters and digits are accepted; everything else is swallowed.
 #[derive(Debug, Clone)]
 pub struct Keypad {
-    caps_times: Vec<Instant>,
+    trigger_times: Vec<Instant>,
     shift_down: bool,
     unlock_mode: bool,
     password: String,
@@ -36,7 +44,7 @@ pub struct Keypad {
 impl Keypad {
     pub fn new() -> Self {
         Self {
-            caps_times: Vec::with_capacity(CAPS_TRIGGER_COUNT),
+            trigger_times: Vec::with_capacity(TRIGGER_COUNT),
             shift_down: false,
             unlock_mode: false,
             password: String::with_capacity(16),
@@ -44,7 +52,7 @@ impl Keypad {
     }
 
     pub fn reset(&mut self) {
-        self.caps_times.clear();
+        self.trigger_times.clear();
         self.shift_down = false;
         self.unlock_mode = false;
         self.password.clear();
@@ -61,23 +69,26 @@ impl Keypad {
     /// Feed a single key press (already de-duplicated by backend).
     /// Returns the action for the caller to act on.
     pub fn feed(&mut self, now: Instant, key: RawKey) -> Action {
+        // Gesture counting only while disarmed: once armed the trigger key is a
+        // normal password character, and a repeated gesture must never clear
+        // what has already been typed.
+        if key == TRIGGER_KEY && !self.unlock_mode {
+            self.trigger_times.push(now);
+            self.trigger_times
+                .retain(|&t| now.duration_since(t) < TRIGGER_WINDOW);
+            if self.trigger_times.len() >= TRIGGER_COUNT {
+                self.trigger_times.clear();
+                self.unlock_mode = true;
+                self.password.clear();
+                return Action::UnlockMode;
+            }
+            return Action::None;
+        }
         match key {
+            // No longer the gesture; ignored and never buffered.
+            RawKey::CapsLock => Action::None,
             RawKey::ShiftLeft | RawKey::ShiftRight => {
                 self.shift_down = true;
-                Action::None
-            }
-            RawKey::CapsLock => {
-                self.caps_times.push(now);
-                self.caps_times
-                    .retain(|&t| now.duration_since(t) < CAPS_TRIGGER_WINDOW);
-                if self.caps_times.len() >= CAPS_TRIGGER_COUNT {
-                    self.caps_times.clear();
-                    if !self.unlock_mode {
-                        self.unlock_mode = true;
-                        self.password.clear();
-                        return Action::UnlockMode;
-                    }
-                }
                 Action::None
             }
             RawKey::Backspace => {
@@ -131,15 +142,15 @@ impl Keypad {
     pub fn cancel_unlock_mode(&mut self) {
         self.unlock_mode = false;
         self.password.clear();
-        self.caps_times.clear();
+        self.trigger_times.clear();
     }
 
     /// Call when the input device is lost or backend exits unexpectedly.
-    /// Clears transient state (shift, caps tracking) but preserves password
+    /// Clears transient state (shift, gesture tracking) but preserves password
     /// and unlock mode so the user can continue after reconnect.
     pub fn device_lost(&mut self) {
         self.shift_down = false;
-        self.caps_times.clear();
+        self.trigger_times.clear();
     }
 
     fn push(&mut self, ch: char) {
@@ -159,33 +170,42 @@ impl Default for Keypad {
 mod tests {
     use super::*;
 
-    #[test]
-    fn caps_three_times_unlock_mode() {
-        let mut k = Keypad::new();
-        let now = Instant::now();
-        assert_eq!(k.feed(now, RawKey::CapsLock), Action::None);
-        assert_eq!(
-            k.feed(now + Duration::from_millis(300), RawKey::CapsLock),
-            Action::None
-        );
-        assert_eq!(
-            k.feed(now + Duration::from_millis(600), RawKey::CapsLock),
-            Action::UnlockMode
-        );
-        assert!(k.is_unlock_mode());
+    /// Arm the keypad with the gesture, three presses 300 ms apart.
+    fn arm(k: &mut Keypad, now: Instant) {
+        for i in 0..TRIGGER_COUNT {
+            k.feed(now + Duration::from_millis(i as u64 * 300), TRIGGER_KEY);
+        }
     }
 
     #[test]
-    fn caps_expires_after_window() {
+    fn trigger_three_times_arms_unlock_mode() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        k.feed(now, RawKey::CapsLock);
-        k.feed(now + Duration::from_millis(300), RawKey::CapsLock);
+        assert_eq!(k.feed(now, TRIGGER_KEY), Action::None);
+        assert_eq!(
+            k.feed(now + Duration::from_millis(300), TRIGGER_KEY),
+            Action::None
+        );
+        assert_eq!(
+            k.feed(now + Duration::from_millis(600), TRIGGER_KEY),
+            Action::UnlockMode
+        );
+        assert!(k.is_unlock_mode());
+        // Arming presses are swallowed, they are not password characters.
+        assert!(k.password().is_empty());
+    }
+
+    #[test]
+    fn trigger_expires_after_window() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        k.feed(now, TRIGGER_KEY);
+        k.feed(now + Duration::from_millis(300), TRIGGER_KEY);
         // third press outside window → no unlock
         assert_eq!(
             k.feed(
-                now + CAPS_TRIGGER_WINDOW + Duration::from_millis(10),
-                RawKey::CapsLock
+                now + TRIGGER_WINDOW + Duration::from_millis(10),
+                TRIGGER_KEY
             ),
             Action::None
         );
@@ -193,12 +213,39 @@ mod tests {
     }
 
     #[test]
+    fn caps_lock_no_longer_arms_or_types() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        for i in 0..5 {
+            assert_eq!(
+                k.feed(now + Duration::from_millis(i * 100), RawKey::CapsLock),
+                Action::None
+            );
+        }
+        assert!(!k.is_unlock_mode());
+        arm(&mut k, now);
+        assert!(k.is_unlock_mode());
+        assert_eq!(k.feed(now, RawKey::CapsLock), Action::None);
+        assert!(k.password().is_empty());
+    }
+
+    #[test]
+    fn trigger_key_is_a_password_character_once_armed() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        arm(&mut k, now);
+        assert!(k.is_unlock_mode());
+        assert_eq!(k.feed(now, TRIGGER_KEY), Action::Password { len: 1 });
+        assert_eq!(k.password(), "j");
+        // Still armed after typing the trigger key as a character.
+        assert!(k.is_unlock_mode());
+    }
+
+    #[test]
     fn password_build_and_submit() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        k.feed(now, RawKey::CapsLock);
-        k.feed(now + Duration::from_millis(300), RawKey::CapsLock);
-        k.feed(now + Duration::from_millis(600), RawKey::CapsLock);
+        arm(&mut k, now);
         assert!(k.is_unlock_mode());
 
         assert_eq!(
@@ -217,12 +264,7 @@ mod tests {
         let mut k = Keypad::new();
         let now = Instant::now();
         // arm
-        for i in 0..3 {
-            k.feed(
-                now + Duration::from_millis(i as u64 * 300),
-                RawKey::CapsLock,
-            );
-        }
+        arm(&mut k, now);
         k.feed(now, RawKey::ShiftLeft);
         k.feed(now, RawKey::Letter('a'));
         assert_eq!(k.password(), "A");
@@ -234,12 +276,7 @@ mod tests {
     fn wrong_password_clears_mode() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        for i in 0..3 {
-            k.feed(
-                now + Duration::from_millis(i as u64 * 300),
-                RawKey::CapsLock,
-            );
-        }
+        arm(&mut k, now);
         k.feed(now, RawKey::Letter('x'));
         assert!(k.is_unlock_mode());
         k.cancel_unlock_mode();
@@ -248,30 +285,22 @@ mod tests {
     }
 
     #[test]
-    fn caps_does_not_turn_off_unlock_mode() {
+    fn repeated_gesture_after_arming_types_characters() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        for i in 0..3 {
-            k.feed(
-                now + Duration::from_millis(i as u64 * 300),
-                RawKey::CapsLock,
-            );
-        }
-        // extra caps after armed must not disarm
-        assert_eq!(k.feed(now, RawKey::CapsLock), Action::None);
+        arm(&mut k, now);
+        // After arming the trigger key types, it never disarms or clears.
+        assert_eq!(k.feed(now, TRIGGER_KEY), Action::Password { len: 1 });
+        assert_eq!(k.feed(now, TRIGGER_KEY), Action::Password { len: 2 });
         assert!(k.is_unlock_mode());
+        assert_eq!(k.password(), "jj");
     }
 
     #[test]
     fn max_password_len() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        for i in 0..3 {
-            k.feed(
-                now + Duration::from_millis(i as u64 * 300),
-                RawKey::CapsLock,
-            );
-        }
+        arm(&mut k, now);
         for _ in 0..PASSWORD_MAX_LEN + 10 {
             k.feed(now, RawKey::Letter('a'));
         }
@@ -279,17 +308,17 @@ mod tests {
     }
 
     #[test]
-    fn device_lost_clears_shift_and_caps() {
+    fn device_lost_clears_shift_and_gesture() {
         let mut k = Keypad::new();
         let now = Instant::now();
         k.feed(now, RawKey::ShiftLeft);
         assert!(k.shift_down);
-        k.feed(now + Duration::from_millis(100), RawKey::CapsLock);
-        assert!(!k.caps_times.is_empty());
+        k.feed(now + Duration::from_millis(100), TRIGGER_KEY);
+        assert!(!k.trigger_times.is_empty());
 
         k.device_lost();
         assert!(!k.shift_down);
-        assert!(k.caps_times.is_empty());
+        assert!(k.trigger_times.is_empty());
         // unlock_mode and password should survive
         assert!(!k.is_unlock_mode()); // not armed yet
         assert!(k.password().is_empty());
@@ -299,12 +328,7 @@ mod tests {
     fn device_lost_preserves_unlock_mode_and_password() {
         let mut k = Keypad::new();
         let now = Instant::now();
-        for i in 0..3 {
-            k.feed(
-                now + Duration::from_millis(i as u64 * 300),
-                RawKey::CapsLock,
-            );
-        }
+        arm(&mut k, now);
         k.feed(now, RawKey::Letter('x'));
         assert!(k.is_unlock_mode());
         assert_eq!(k.password(), "x");

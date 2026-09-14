@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 fn main() {
     println!("Stasis grab test: will grab for 5 seconds, then auto-release.");
     println!("Press some keys (they won't reach other apps).");
-    println!("CapsLock x3 should print 'UNLOCK MODE'.");
+    println!("j x3 should print 'UNLOCK MODE'.");
     println!();
 
     let (tx, rx) = crossbeam_channel::unbounded();
