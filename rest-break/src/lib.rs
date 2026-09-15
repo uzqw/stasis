@@ -1,4 +1,7 @@
 //! Pure rest-break decision core. No network or locking side effects.
+//! `run` 模块承载编排副作用（HTTP/MCP/文件），经 Env 注入端点便于测试。
+pub mod run;
+
 use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -463,4 +466,143 @@ pub fn read_history(path: &std::path::Path) -> Result<Value, String> {
             Ok(serde_json::to_value(entries).unwrap())
         }
     }
+}
+
+// ---- 编排支撑：pending 防重、原子写、状态文件、计划清理 ----
+
+/// pending.json：一次已提交但结果未确认的休息请求（不确定执行保护）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pending {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
+    pub started_at: String,
+    pub expires_at: String,
+}
+
+/// 读取 pending.json 的三种状态：不存在、存在（可能损坏）、读文件 IO 错。
+pub enum PendingFile {
+    Absent,
+    Present(Pending),
+    IoError(std::io::Error),
+}
+
+pub fn read_pending(path: &std::path::Path) -> PendingFile {
+    match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PendingFile::Absent,
+        Err(e) => PendingFile::IoError(e),
+        Ok(bytes) => PendingFile::Present(serde_json::from_slice(&bytes).unwrap_or(Pending {
+            session_id: String::new(),
+            started_at: String::new(),
+            expires_at: "invalid".into(),
+        })),
+    }
+}
+
+/// 原子写 JSON：tmp + rename，崩溃前 rename 则目标文件保持旧内容。
+pub fn write_json_atomic(path: &std::path::Path, v: &impl Serialize) -> Result<(), String> {
+    let mut data = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
+    data.push(b'\n');
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = std::path::Path::new(&tmp);
+    std::fs::write(tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+}
+
+/// 新会话 ID：16 字节随机 hex，前缀 rb-（与 Go 版格式一致）。
+pub fn new_session_id() -> Result<String, String> {
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "rb-{}",
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    ))
+}
+
+/// 状态 JSON（UI 轮询，cron 每分钟原子写一次）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub state: String, // ok | cooldown | error
+    pub fatigue_minutes: f64,
+    pub circadian: f64,
+    pub work_minutes: f64,
+    pub due: bool,
+    pub rest_minutes: i32,
+    pub next_rest_at: String,
+    pub next_rest_minutes: i32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cooldown_until: String,
+    pub reason: String,
+    pub checked_at: String,
+}
+
+fn beijing(t: Time) -> String {
+    iso(t + Duration::hours(8)).replace("+00:00", "+08:00")
+}
+
+/// 组装状态对象；写文件失败只告警由调用方处理。
+pub fn build_status(now: Time, result: &Decision, fatigue: f64, until: Option<Time>) -> Status {
+    let state = if result.reason.starts_with("error:") || result.reason.starts_with("invalid_data:")
+    {
+        "error"
+    } else if until.is_some_and(|u| now < u) {
+        "cooldown"
+    } else {
+        "ok"
+    };
+    let (next_at, next_min) = predict_next_rest(now, fatigue, until);
+    Status {
+        state: state.into(),
+        fatigue_minutes: (fatigue / 60.0 * 10.0).round() / 10.0,
+        circadian: circadian_factor(beijing_hour(now)),
+        work_minutes: result.work_minutes,
+        due: result.due,
+        rest_minutes: result.rest_minutes,
+        next_rest_at: beijing(next_at),
+        next_rest_minutes: next_min,
+        cooldown_until: until.map(beijing).unwrap_or_default(),
+        reason: result.reason.clone(),
+        checked_at: iso(now),
+    }
+}
+
+/// 计划里存在未结束的 once 锁定或任何 recurring → 冲突。
+pub fn find_conflict(plan: &[Value], now: Time) -> bool {
+    plan.iter().any(|task| {
+        let mode = task.get("mode").and_then(Value::as_str).unwrap_or("");
+        if mode == "recurring" {
+            return true;
+        }
+        if mode != "once" {
+            return false;
+        }
+        ["when", "unlock"].iter().any(|key| {
+            task.get(*key)
+                .and_then(|w| w.get("at"))
+                .and_then(Value::as_str)
+                .and_then(|s| parse_time(s).ok())
+                .is_some_and(|t| t > now)
+        })
+    })
+}
+
+/// 丢弃 unlock 已过的 once 任务；recurring 保留。
+pub fn prune_expired(plan: Vec<Value>, now: Time) -> Vec<Value> {
+    plan.into_iter()
+        .filter(|task| {
+            if task.get("mode").and_then(Value::as_str) != Some("once") {
+                return true;
+            }
+            !task
+                .get("unlock")
+                .and_then(|u| u.get("at"))
+                .and_then(Value::as_str)
+                .and_then(|s| parse_time(s).ok())
+                .is_some_and(|t| t <= now)
+        })
+        .collect()
 }

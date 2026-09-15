@@ -10,6 +10,9 @@ description = "Rest-break decision core: when to rest (Rust port of aide/rest-br
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# HTTP 仅打本机/内网 http（AW :5600 与 aide MCP），无需 TLS；
+# ureq 是仓内技术栈之外最轻量的阻塞式客户端，默认特性关掉避免拉入 rustls/gzip。
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"
