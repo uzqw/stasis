@@ -132,6 +132,12 @@ fn mock_mcp(initial_plan: Value, written: &'static AtomicUsize) -> Server {
 static NO_WRITES: AtomicUsize = AtomicUsize::new(0);
 static WRITES: AtomicUsize = AtomicUsize::new(0);
 
+/// 串行锁：AW_BASE_URL / MCP_URL 是进程全局状态，凡触碰它们的测试全程持锁。
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // 进程全局 env 覆盖：AW_BASE_URL 只读；mcp url 经全局槽位（fn 指针无法捕获）。
 static MCP_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 fn mcp_url_slot() -> Result<(String, Vec<(String, String)>), String> {
@@ -182,6 +188,7 @@ fn setup(
 
 #[test]
 fn not_due_exits_without_executing() {
+    let _g = serial();
     let (_aw, _mcp, env, _dir) = setup(json!([]), json!([]), &NO_WRITES);
     let (code, out, _) = run_capture(&env, &[]);
     assert_eq!(code, 0);
@@ -191,6 +198,7 @@ fn not_due_exits_without_executing() {
 
 #[test]
 fn check_never_executes_even_when_due() {
+    let _g = serial();
     let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
     let (code, out, _) = run_capture(&env, &["--check"]);
     assert_eq!(code, 0);
@@ -203,6 +211,7 @@ fn check_never_executes_even_when_due() {
 
 #[test]
 fn uncertain_execution_suppresses_due_decision() {
+    let _g = serial();
     let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
     let p = Pending {
         session_id: String::new(),
@@ -218,6 +227,7 @@ fn uncertain_execution_suppresses_due_decision() {
 
 #[test]
 fn expired_protection_no_longer_suppresses_checks() {
+    let _g = serial();
     let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
     let p = Pending {
         session_id: String::new(),
@@ -233,6 +243,7 @@ fn expired_protection_no_longer_suppresses_checks() {
 
 #[test]
 fn corrupt_pending_fails_closed() {
+    let _g = serial();
     let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
     std::fs::write(dir.join(PENDING_FILE), r#"{"expiresAt":"bad date"}"#).unwrap();
     let (code, _out, err) = run_capture(&env, &[]);
@@ -263,6 +274,7 @@ fn prune_expired_drops_past_once_keeps_future_and_recurring() {
 
 #[test]
 fn execute_plan_publishes_immutable_rest_request() {
+    let _g = serial();
     let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
     let (code, _out, err) = run_capture(&env, &[]);
     assert_eq!(code, 0, "stderr = {err}");
@@ -275,6 +287,7 @@ fn execute_plan_publishes_immutable_rest_request() {
 
 #[test]
 fn run_does_not_rewrite_legacy_plan() {
+    let _g = serial();
     let (_aw, _mcp, env, _dir) = setup(due_events(), json!([]), &WRITES);
     let (code, _out, err) = run_capture(&env, &[]);
     assert_eq!(code, 0, "stderr = {err}");
@@ -287,6 +300,7 @@ fn run_does_not_rewrite_legacy_plan() {
 
 #[test]
 fn cleanup_no_expired_no_write_back() {
+    let _g = serial();
     let writes: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
     let future = Utc::now() + Duration::hours(2);
     let initial = json!([{
@@ -322,6 +336,7 @@ fn write_json_atomic_crash_before_rename_keeps_old_file() {
 
 #[test]
 fn fetch_raw_three_hours_unlimited() {
+    let _g = serial();
     // 记录请求参数：bucket 发现 + events 拉取两次调用。
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let now = now_fixed();
@@ -361,6 +376,7 @@ fn fetch_raw_three_hours_unlimited() {
 
 #[test]
 fn find_afk_bucket_prefixed() {
+    let _g = serial();
     let server = serve(|path, _query, _body| {
         assert_eq!(path, "/api/0/buckets/");
         (200, r#"["aw-stopwatch","aw-watcher-afk_TEST"]"#.into())
@@ -392,6 +408,7 @@ fn find_afk_bucket_prefixed() {
 
 #[test]
 fn cli_errors_emit_skip_json_and_exit_zero() {
+    let _g = serial();
     // AW 不可达：http_get 注入失败；MCP 可用（sessions=[]）。
     let mcp = mock_mcp(json!([]), &NO_WRITES);
     *MCP_URL.lock().unwrap() = Some(mcp.url.clone());
