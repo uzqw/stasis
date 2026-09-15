@@ -7,6 +7,12 @@
 .codegraph/
 *.bak-*
 
+# rest-break runtime state (cron lock, status/history/pending next to binary)
+rest-break/.run.lock
+rest-break/status.json
+rest-break/history.json
+rest-break/pending.json
+
 # OS noise
 .DS_Store
 

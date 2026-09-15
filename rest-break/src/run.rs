@@ -186,6 +186,9 @@ pub fn mcp_call(env: &Env, tool: &str, args: Value) -> Result<String, String> {
         .config()
         .timeout_global(Some(StdDuration::from_secs(10)))
         .build()
+        // aide MCP 严格要求 Content-Type: application/json（缺省 415）；
+        // ureq send_json 只在 body 自带 content-type 时设置，这里显式钉死。
+        .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream");
     for (k, v) in headers {
         req = req.header(k, v);

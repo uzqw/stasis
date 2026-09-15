@@ -40,18 +40,27 @@ fn serve(handler: impl Fn(&str, &str, &[u8]) -> (u16, String) + Send + 'static) 
                 None => (target, String::new()),
             };
             let mut content_len = 0usize;
+            let mut content_type = String::new();
             loop {
                 line.clear();
                 if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
                     break;
                 }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
                     content_len = v.trim().parse().unwrap_or(0);
+                } else if let Some(v) = lower.strip_prefix("content-type:") {
+                    content_type = v.trim().to_string();
                 }
             }
             let mut body = vec![0u8; content_len];
             reader.read_exact(&mut body).unwrap_or_default();
-            let (status, resp) = handler(&path, &query, &body);
+            // 与真实 aide 一致：POST /mcp 缺 Content-Type: application/json → 415。
+            let (status, resp) = if content_len > 0 && content_type != "application/json" {
+                (415, "missing content-type".into())
+            } else {
+                handler(&path, &query, &body)
+            };
             let reason = if status == 200 { "OK" } else { "Error" };
             let out = format!(
                 "HTTP/1.1 {status} {reason}\r\n\
