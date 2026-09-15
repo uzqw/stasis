@@ -76,7 +76,11 @@ cargo clippy --manifest-path rest-break/Cargo.toml --all-targets -- -D warnings
 
 二进制已实现完整编排：`--check` 只判定不安排，due 时经 `request_rest` 提交
 rest.requested 事件（不写 history），pending.json 提供 35 分钟不确定执行保护。
-cron 入口脚本与端到端集成测试尚未适配，不能替换现役部署。
+`rest-break/run_rest_break_cron.sh` 是 cron 每分钟入口（flock 防重、日志滚动、
+WSL 网关自动发现、overlay 文本生成）；`rest-break/integration_test.sh` 在隔离
+目录里跑端到端：mock AW + 隔离 aide + 真 rest-break 二进制 + Stasis session
+controller（`examples/rest_session_drive`，假锁执行器），全程不碰生产服务与
+真机输入。已验证通过一次；切换/替换现役 aide 部署仍由用户另行决定。
 根目录 Cargo 命令不包含此独立 crate，须额外执行上面的检查。
 
 ## 规范

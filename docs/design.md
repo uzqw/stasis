@@ -166,6 +166,9 @@ UI 主线程 ──────────Lock/ChangePassword/Exit────�
 - 文件读取设大小/数量防护，结果不可变；同目录唯一临时文件写完后原子发布，不使用跨文件系统 rename
   。
 
+`rest-break/` crate 是本协议的调度侧实现：经 aide MCP 读会话、写 `rest.requested`，
+不直接写事件目录；Stasis 本体（`src/session.rs`）是唯一消费者。
+
 ### 6.1 物理动作与日志不是一个事务
 
 不能原样复制旧控制器后就宣称可靠：
