@@ -59,6 +59,24 @@ cargo build --release
 新项目独立开发，原 `../input-locker` 保留使用。切换前不得让两个程序同时消费同一事件目录或抓取输
 入。
 
+## Rest-break 判定核心
+
+`rest-break/` 是独立 Rust crate，负责「何时休息」，不依赖锁屏 GUI 或输入后端。
+已移植疲劳积分、昼夜节律、冷却与实际锁定区间恢复；31 个离线测试对应 Go 判定测试。
+复用 chrono 处理带时区时间、serde/serde_json 处理协议 JSON；tempfile 仅用于隔离测试。
+独立 crate 避免每次构建 cron 工具都引入 GUI 和输入设备依赖。
+
+```sh
+cargo test --manifest-path rest-break/Cargo.toml
+cargo fmt --manifest-path rest-break/Cargo.toml --check
+cargo clippy --manifest-path rest-break/Cargo.toml --all-targets -- -D warnings
+```
+
+当前二进制仅输出 `due:false` 的未接入错误，不读写真实事件目录。
+HTTP/MCP、cron、status.json 与端到端集成尚未实现，不能替换现役部署。
+Go 测试中的 HTTP 查询、bucket 发现和 CLI 错误处理测试将在编排接入时移植。
+根目录 Cargo 命令不包含此独立 crate，须额外执行上面的检查。
+
 ## 规范
 
 - 提交信息、分支命名、AI 声明：[CONTRIBUTING.md](CONTRIBUTING.md)（提交信息统一英文）。
