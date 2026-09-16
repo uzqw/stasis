@@ -86,6 +86,60 @@ pub fn detail_lines(s: &UiStatus) -> Vec<(String, String)> {
     ]
 }
 
+/// 指针移出后保持展开的宽限时间：既方便从摘要移到详情，也避免指针在窗口
+/// 边缘抖动时反复开合。
+pub const COLLAPSE_DELAY_MS: u64 = 600;
+
+/// 展开交互状态机（纯逻辑，时间由调用方以单调毫秒传入，便于离线测试）：
+///
+/// - 指针进入窗口即展开；
+/// - 指针移出后延迟 [`COLLAPSE_DELAY_MS`] 收起；
+/// - 点击切换「钉住」，钉住期间指针移出也不收起（点击时指针必然在窗内）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HoverState {
+    expanded: bool,
+    pinned: bool,
+    hover_out_ms: Option<u64>,
+}
+
+impl HoverState {
+    pub fn expanded(self) -> bool {
+        self.expanded
+    }
+
+    pub fn pinned(self) -> bool {
+        self.pinned
+    }
+
+    /// 每帧调用一次：`hovered` = 指针在窗口内，`clicked` = 本帧窗内按下并松开，
+    /// `now_ms` = 单调毫秒。返回更新后的展开态。
+    pub fn update(&mut self, hovered: bool, clicked: bool, now_ms: u64) -> bool {
+        if clicked {
+            self.pinned = !self.pinned;
+        }
+        if hovered || self.pinned {
+            self.expanded = true;
+            self.hover_out_ms = None;
+        } else if self.expanded {
+            match self.hover_out_ms {
+                None => self.hover_out_ms = Some(now_ms),
+                Some(at) if now_ms.saturating_sub(at) >= COLLAPSE_DELAY_MS => {
+                    self.expanded = false;
+                    self.hover_out_ms = None;
+                }
+                Some(_) => {}
+            }
+        }
+        self.expanded
+    }
+
+    /// 收起倒计时剩余毫秒；`Some` 表示需要按该延迟安排一次重绘。
+    pub fn collapse_in_ms(self, now_ms: u64) -> Option<u64> {
+        let at = self.hover_out_ms?;
+        Some(COLLAPSE_DELAY_MS.saturating_sub(now_ms.saturating_sub(at)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +237,46 @@ mod tests {
             summary_line(&load(&path).unwrap()),
             "疲劳 61 分钟 · 下次 00:15 开始 · 10 分钟"
         );
+    }
+
+    #[test]
+    fn hover_expands_and_collapses_after_delay() {
+        let mut h = HoverState::default();
+        assert!(!h.expanded());
+        assert!(h.update(true, false, 0));
+        // 移出后延迟内保持展开
+        assert!(h.update(false, false, 100));
+        assert_eq!(h.collapse_in_ms(100), Some(COLLAPSE_DELAY_MS));
+        assert!(h.update(false, false, 100 + COLLAPSE_DELAY_MS - 1));
+        assert!(h.expanded());
+        // 超过延迟收起，倒计时结束
+        assert!(!h.update(false, false, 100 + COLLAPSE_DELAY_MS));
+        assert_eq!(h.collapse_in_ms(100 + COLLAPSE_DELAY_MS), None);
+        // 重新进入立即展开
+        assert!(h.update(true, false, 5000));
+        assert_eq!(h.collapse_in_ms(5000), None);
+    }
+
+    #[test]
+    fn click_pins_expanded_until_next_click() {
+        let mut h = HoverState::default();
+        assert!(h.update(true, true, 0));
+        assert!(h.pinned());
+        // 钉住期间移出再久也不收起
+        assert!(h.update(false, false, 10_000));
+        assert!(h.expanded());
+        assert_eq!(h.collapse_in_ms(10_000), None);
+        // 再点一次取消钉住，移出后仍按延迟收起
+        assert!(h.update(true, true, 10_100));
+        assert!(!h.pinned());
+        assert!(h.update(false, false, 10_200));
+        assert!(!h.update(false, false, 10_200 + COLLAPSE_DELAY_MS));
+    }
+
+    #[test]
+    fn move_out_without_expand_keeps_timer_idle() {
+        let mut h = HoverState::default();
+        assert!(!h.update(false, false, 0));
+        assert_eq!(h.collapse_in_ms(0), None);
     }
 }

@@ -1,4 +1,4 @@
-//! rest-break 常驻状态 UI：置顶、可拖动的小窗，一行摘要 + 点击展开详情。
+//! rest-break 常驻状态 UI：置顶、可拖动的小窗，一行摘要 + 悬停/点击展开详情。
 //! 只读 status.json（每 1s 重新读取自动刷新），不写判定状态、不抓输入。
 //! 仅在 `ui` feature 下编译：
 //! `cargo run --manifest-path rest-break/Cargo.toml --features ui --bin rest-break-ui`。
@@ -152,7 +152,7 @@ fn text_width(text: &str, font_size: f32) -> f32 {
 struct App {
     config: Config,
     status: Result<rest_break::ui::UiStatus, String>,
-    expanded: bool,
+    hover: rest_break::ui::HoverState,
     positioned: bool,
     above_sent: bool,
     last_size: egui::Vec2,
@@ -162,7 +162,7 @@ impl App {
     fn new(config: Config) -> Self {
         App {
             status: rest_break::ui::load(&config.status_path),
-            expanded: false,
+            hover: rest_break::ui::HoverState::default(),
             positioned: false,
             above_sent: false,
             last_size: egui::vec2(0.0, 0.0),
@@ -181,7 +181,7 @@ impl App {
         let detail_size = self.config.font_size - 2.0;
         let mut width = text_width(&self.summary(), self.config.font_size);
         let mut lines = 0.0;
-        if self.expanded {
+        if self.hover.expanded() {
             match &self.status {
                 Ok(s) => {
                     let items = rest_break::ui::detail_lines(s);
@@ -196,7 +196,7 @@ impl App {
                 }
             }
         }
-        let height = if self.expanded {
+        let height = if self.hover.expanded() {
             46.0 + lines * (self.config.font_size + 8.0)
         } else {
             46.0
@@ -220,14 +220,7 @@ impl eframe::App for App {
             ));
         }
 
-        // 悬停展开：指针在窗口内就显示详情（点击时指针必然在窗口内，等效可用）。
-        // 展开只向下长，指针不会因尺寸变化离开，因此不会来回抖动。
-        self.expanded = ctx.input(|i| {
-            i.viewport()
-                .inner_rect
-                .zip(i.pointer.hover_pos())
-                .is_some_and(|(rect, pos)| rect.contains(pos))
-        });
+        // 悬停展开与点击钉住在 `ui()` 里判定（需要指针与点击响应）。
 
         // 首帧按配置角落定位（需要显示器尺寸，只能在 logic 里做）。
         if !self.positioned {
@@ -248,6 +241,12 @@ impl eframe::App for App {
         if size != self.last_size {
             self.last_size = size;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+
+        // 指针已移出且未钉住时，按剩余宽限时间安排一次重绘完成收起。
+        let now_ms = ctx.input(|i| (i.time * 1000.0) as u64);
+        if let Some(ms) = self.hover.collapse_in_ms(now_ms) {
+            ctx.request_repaint_after(Duration::from_millis(ms));
         }
 
         // 增长后若越出屏幕（底部/右侧），按需移回屏内；保持用户拖动的位置，
@@ -276,17 +275,43 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // 交互判定必须用视口局部坐标：`hover_pos` 是视口局部坐标，而
+        // `viewport().inner_rect` 是屏幕坐标（Wayland 上恒为 None），
+        // 两者混用会把「指针在窗内」永远判成假（leg 1 悬停失效的根因）。
+        let hovered = ctx.input(|i| {
+            i.pointer
+                .hover_pos()
+                .is_some_and(|p| i.viewport_rect().contains(p))
+        });
+        // 背景可拖动，方便移动窗口；同时当点击目标（拖动需要按住并移动，
+        // 快速点按只算点击，不会触发 WM 拖动而吞掉松手事件）。
+        // 用 interact 而非 allocate_rect：后者会把布局游标推到窗口底部，
+        // 让后续内容全被裁剪（窗口只剩底色）。
+        let drag = ui.interact(
+            ui.max_rect(),
+            ui.id().with("bg-drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.dragged() {
+            ctx_drag(&ctx);
+        }
+        // 点击用原始指针事件而非 `Response::clicked()`：文字 Label 会盖在背景层
+        // 之上，egui 的命中测试只把「最上层 widget」算作 hovered，指针落在文字上
+        // 时背景 widget 拿不到 click。窗口本身就是点击目标，直接取本帧的点击。
+        let (now_ms, clicked) =
+            ctx.input(|i| ((i.time * 1000.0) as u64, i.pointer.primary_clicked()));
+        let was_expanded = self.hover.expanded();
+        self.hover.update(hovered, clicked, now_ms);
+        if self.hover.expanded() != was_expanded {
+            // 窗口尺寸在 `logic()` 里发送，需要下一帧才会生效。
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ui, |ui| {
-                // 背景可拖动，方便移动窗口。
-                // 用 interact 而非 allocate_rect：后者会把布局游标推到窗口底部，
-                // 让后续内容全被裁剪（窗口只剩底色）。
-                let drag = ui.interact(ui.max_rect(), ui.id().with("bg-drag"), egui::Sense::drag());
-                if drag.dragged() {
-                    ctx_drag(ui.ctx());
-                }
-
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
                     ui.add(
@@ -298,7 +323,7 @@ impl eframe::App for App {
                         .selectable(false),
                     );
 
-                    if self.expanded {
+                    if self.hover.expanded() {
                         ui.add_space(6.0);
                         match &self.status {
                             Ok(s) => {
