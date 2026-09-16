@@ -1,6 +1,7 @@
 //! Pure rest-break decision core. No network or locking side effects.
 //! `run` 模块承载编排副作用（HTTP/MCP/文件），经 Env 注入端点便于测试。
 pub mod run;
+pub mod ui;
 
 use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Serialize};

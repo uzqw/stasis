@@ -13,6 +13,19 @@ serde_json = "1"
 # HTTP 仅打本机/内网 http（AW :5600 与 aide MCP），无需 TLS；
 # ureq 是仓内技术栈之外最轻量的阻塞式客户端，默认特性关掉避免拉入 rustls/gzip。
 ureq = { version = "3", default-features = false, features = ["json"] }
+# GUI 仅用于常驻状态 UI（rest-break-ui bin），放在 optional feature 下，
+# 保证 cron 二进制的默认依赖树不引入 GUI 依赖；选型复用根 crate 的 eframe/egui 0.36。
+eframe = { version = "0.36", optional = true, default-features = false, features = [
+    "default_fonts", "glow", "x11", "wayland",
+] }
+
+[features]
+ui = ["dep:eframe"]
+
+[[bin]]
+name = "rest-break-ui"
+path = "src/bin/rest-break-ui.rs"
+required-features = ["ui"]
 
 [dev-dependencies]
 tempfile = "3"
