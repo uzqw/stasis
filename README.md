@@ -83,6 +83,29 @@ controller（`examples/rest_session_drive`，假锁执行器），全程不碰�
 真机输入。已验证通过一次；切换/替换现役 aide 部署仍由用户另行决定。
 根目录 Cargo 命令不包含此独立 crate，须额外执行上面的检查。
 
+### rest-break 状态 UI（`rest-break-ui`）
+
+`rest-break/src/bin/rest-break-ui.rs` 是常驻状态小窗：一行为摘要（疲劳分钟 · 下次休息 ·
+时长），悬停展开完整字段（state、fatigueMinutes、nextRestAt、nextRestMinutes、
+workMinutes、circadian、reason、checkedAt、cooldownUntil）。它只读 status.json（默认每 1s
+重读），不写判定状态、不抓输入；崩溃或退出均不影响判定与锁屏链路。GUI 依赖复用根 crate 的
+eframe/egui 0.36，放在 optional feature `ui` 下，因此 cron 二进制的默认依赖树不含 GUI：
+
+```sh
+cargo run --manifest-path rest-break/Cargo.toml --features ui --bin rest-break-ui
+```
+
+配置经环境变量：`STATUS_FILE`（缺省 `./status.json`）、`RB_UI_CORNER`=`ne|nw|se|sw`
+（缺省 `se`）、`RB_UI_MARGIN`（缺省 `90`）、`RB_UI_FONT_SIZE`（缺省 `14`）、
+`RB_UI_TEXT_COLOR`（`#rrggbb`，缺省白）。
+
+验证状态（真机为 Linux XWayland 授权桌面）：窗口可见、右下角定位与展开越界回弹、置顶
+（`_NET_WM_STATE_ABOVE`）、随 status.json 刷新、错误态如实提示、只读不改生产 status.json、
+退出后无残留进程，均已实际确认；详情完整字段的渲染以一次性临时构建截图确认。**未验证**：
+悬停/点击展开的交互（本机是 Wayland 会话，指针注入不驱动 XWayland 窗口，需真鼠标确认）；
+Windows 仅 `cargo check --features ui --target x86_64-pc-windows-gnu` 通过，未做真机运行。
+Wayland 原生协议无全局置顶能力，置顶依赖 XWayland/EWMH。
+
 ## 规范
 
 - 提交信息、分支命名、AI 声明：[CONTRIBUTING.md](CONTRIBUTING.md)（提交信息统一英文）。
