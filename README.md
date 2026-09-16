@@ -86,13 +86,15 @@ controller（`examples/rest_session_drive`，假锁执行器），全程不碰�
 ### rest-break 状态 UI（`rest-break-ui`）
 
 `rest-break/src/bin/rest-break-ui.rs` 是常驻状态小窗：一行为摘要（疲劳分钟 · 下次休息 ·
-时长），悬停展开完整字段（state、fatigueMinutes、nextRestAt、nextRestMinutes、
-workMinutes、circadian、reason、checkedAt、cooldownUntil）。它只读 status.json（默认每 1s
-重读），不写判定状态、不抓输入；崩溃或退出均不影响判定与锁屏链路。GUI 依赖复用根 crate 的
-eframe/egui 0.36，放在 optional feature `ui` 下，因此 cron 二进制的默认依赖树不含 GUI：
+时长），指针移入即展开完整字段（state、fatigueMinutes、nextRestAt、nextRestMinutes、
+workMinutes、circadian、reason、checkedAt、cooldownUntil），移出 0.6s 后收起，点击可
+钉住详情（再点一次取消）。它只读 status.json（默认每 1s 重读），不写判定状态、不抓输入；
+崩溃或退出均不影响判定与锁屏链路。GUI 依赖复用根 crate 的 eframe/egui 0.36，放在
+optional feature `ui` 下，因此 cron 二进制的默认依赖树不含 GUI：
 
 ```sh
 cargo run --manifest-path rest-break/Cargo.toml --features ui --bin rest-break-ui
+bash rest-break/ui_interaction_test.sh  # 隔离 Xvfb + XTEST 真指针事件的交互检查
 ```
 
 配置经环境变量：`STATUS_FILE`（缺省 `./status.json`）、`RB_UI_CORNER`=`ne|nw|se|sw`
@@ -101,8 +103,18 @@ cargo run --manifest-path rest-break/Cargo.toml --features ui --bin rest-break-u
 
 验证状态（真机为 Linux XWayland 授权桌面）：窗口可见、右下角定位与展开越界回弹、置顶
 （`_NET_WM_STATE_ABOVE`）、随 status.json 刷新、错误态如实提示、只读不改生产 status.json、
-退出后无残留进程，均已实际确认；详情完整字段的渲染以一次性临时构建截图确认。**未验证**：
-悬停/点击展开的交互（本机是 Wayland 会话，指针注入不驱动 XWayland 窗口，需真鼠标确认）；
+退出后无残留进程，均已实际确认。悬停展开、移出 0.6s 宽限收起、点击钉住/取消三态由
+`rest-break/ui_interaction_test.sh` 在隔离 Xvfb（真 X 服务器）上用 XTEST 真指针事件逐步
+核对通过并留下截图，状态机另有 3 个离线单测。**未验证**：真实桌面会话里的真鼠标交互——
+KWin/XWayland 不把 `xdotool` 注入的指针运动投递给客户端（在 `:1` 上用修复后的代码重测：
+指针进入窗口后窗口几何不变），需人工用真鼠标确认一次：
+
+1. 启动：`cargo run --manifest-path rest-break/Cargo.toml --features ui --bin rest-break-ui`
+   （`STATUS_FILE` 指向 status.json，缺省 `./status.json`）；
+2. 指针移入小窗 → 展开九个字段；移出约 0.6s → 收起；点击一次 → 移出后仍展开；
+   再点一次 → 移出后收起；
+3. 证据：展开态与钉住态截图（或录屏）+ 观察结论；退出后 `pgrep -x rest-break-ui` 无残留。
+
 Windows 仅 `cargo check --features ui --target x86_64-pc-windows-gnu` 通过，未做真机运行。
 Wayland 原生协议无全局置顶能力，置顶依赖 XWayland/EWMH。
 
