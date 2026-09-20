@@ -165,8 +165,10 @@ pub mod win {
     }
 }
 
-// macOS virtual keycode -> RawKey
-#[cfg(target_os = "macos")]
+// macOS virtual keycode -> RawKey.
+//
+// Not gated on `target_os`: the mapping is pure data, so it compiles and
+// runs its tests on every host.
 pub mod mac {
     use super::RawKey;
 
@@ -338,7 +340,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn mac_maps_qwerty() {
         use super::mac;
         assert_eq!(mac::to_raw(mac::VK_ANSI_A), RawKey::Letter('a'));
