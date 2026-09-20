@@ -6,7 +6,8 @@ Stasis：**Pause the machine. Rest the human.** —— 暂停键盘鼠标输入�
 
 Rust 重写项目，设计与实施计划见 [docs/design.md](docs/design.md)、
 [docs/implementation-plan.md](docs/implementation-plan.md)。仓库已含可编译的 Rust 实现（`src/`）：
-Linux 后端已在授权真实桌面验证，Windows/macOS 后端尚未实现。验证状态以
+Linux 后端已在授权真实桌面验证，Windows 后端已实现并在真机完成锁定/解锁主链路验证，
+macOS 后端尚未实现。验证状态以
 [README.md](README.md) 为准。
 
 原 Python 版 `../input-locker` 保留使用，不在本仓库内改动。

@@ -13,7 +13,8 @@ Input Locker 的 Rust 重写项目：暂停键盘、鼠标输入，让人休息�
 ## 当前状态
 
 Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到端验证。Windows 输入后端已实现，
-但**未在真机验证**（见下）；macOS 尚未实现。这两项都不作为已验证能力声明。
+并在真机（Windows 11、console 会话、进程不提权）完成锁定/解锁主链路验证（见下）；macOS 尚未
+实现，不作为已验证能力声明。
 
 解锁手势（2026-09-14 起）为 **2 秒内连按 3 次 `j`**；下文 2026-09-13 记录中的 CapsLock×3 是当时的
 行为，已不再生效。
@@ -34,17 +35,30 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
 完整测试记录与截图见
 [docs/notes/stasis-linux-realtest-leg2.md](docs/notes/stasis-linux-realtest-leg2.md)。
 
+### Windows 已验证（2026-09-20，真机）
+
+- 环境：物理机 Windows 11（build 10.0.26200），console 会话、进程不提权；受测构建
+  `stasis.exe` sha256 `ed5882be…8ddd07`（commit `02243e4`，`x86_64-pc-windows-gnu`）。
+- 锁定：UI「锁定系统」与 command 文件 `{"cmd":"lock"}` 均能落锁；低层鼠标钩子确实吞掉
+  指针——锁定中注入鼠标移动，光标位移 0 px。
+- 解锁：真键盘 2 秒内连按 3 次 `j` 进入解锁模式（日志 `unlock mode armed by gesture`），
+  密码 + 回车后 UI 显示「已成功解锁」，钩子随即释放（解锁后注入的同一移动位移 376 px）。
+- command 文件 `{"cmd":"unlock"}` 可强制解锁（本轮两次用于恢复，都在 session 0 执行，
+  不受 session 1 钩子影响）。
+- 锁定约 25 分钟内日志无 `Health` 上报，即钩子回调耗时未超阈值。
+
+完整测试记录与截图见
+[docs/notes/stasis-windows-realtest-leg1.md](docs/notes/stasis-windows-realtest-leg1.md)。
+
 ### 尚未验证 / 未来工作
 
-- **Windows 真机验证（未做）**：输入后端（`src/platform/windows.rs`）已实现，但本机没有
-  Windows，从未运行过真机 grab/解锁。目前只有：`cargo clippy --target
-  x86_64-pc-windows-gnu --all-targets -- -D warnings` 通过，`cargo build --release --target
-  x86_64-pc-windows-gnu` 产出 PE32+ 的 `stasis.exe`（`file` 确认），exe 清单已核对为
-  `asInvoker`（`.rsrc` 里有 `requestedExecutionLevel level="asInvoker"`）。钩子超时/静默移除
-  只能检测可观测的前置条件，依据见 [design.md](docs/design.md) §2.4；真实行为未验证。不提权
-  运行还受 UIPI 限制：发往提权进程与 UAC 安全桌面的输入看不到也拦不住，「完整锁定」尚无依据。
-  **交叉编译通过不等于功能验证。**
-- **macOS**：未实现。
+- **Windows 仍未覆盖**：钩子被静默移除的检测路径（watchdog / `Released`）真机从未触发；
+  UIPI 边界（发往提权进程与 UAC 安全桌面的输入看不到也吞不掉）在测试机上没有提权用户进程，
+  仍未实测；Ctrl+Alt+Del 系统出口无法用注入方式验证；「人手动走完整流程」尚未完成——
+  密码那一步本轮由注入输入完成，物理按键只覆盖了手势。**交叉编译通过不等于功能验证。**
+- **已知交互缺口（真机实测）**：锁定中「强制解锁（UI）」点不动，鼠标钩子会吞掉落在应用
+  自身窗口上的点击，键盘才是锁定态下唯一的应用内通路；进程外恢复靠 command 文件或终止
+  进程。详见真机记录「Findings」。
 - Linux 端尚未覆盖的回归用例（热插拔、半数设备抓取失败、时钟跳变等）见
   [implementation-plan.md](docs/implementation-plan.md) 的回归用例表。
 - 安装包、自启动、签名/权限引导等交付项（阶段 4）未完成；当前仅有 `cargo build --release`
