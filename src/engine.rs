@@ -153,6 +153,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 Ok(UiCmd::Lock) => {
                     if !backend.is_locked() {
                         if config.password.is_empty() {
+                            tracing::warn!("lock refused: no password configured");
                             update(&snapshot, |s| {
                                 s.message = "请先设置密码".into();
                                 s.ok = false;
@@ -161,6 +162,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         }
                         match backend.start_lock() {
                             Ok(()) => {
+                                tracing::info!("locked by ui");
                                 keypad.reset();
                                 update(&snapshot, |s| {
                                     s.locked = true;
@@ -169,6 +171,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                                 });
                             }
                             Err(e) => {
+                                tracing::warn!("lock failed: {e}");
                                 update(&snapshot, |s| {
                                     s.message = format!("锁定失败: {}", e);
                                     s.ok = false;
@@ -200,12 +203,14 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         match candidate.validate().and_then(|_| candidate.save()) {
                             Ok(()) => {
                                 config.password = candidate.password;
+                                tracing::info!("password changed");
                                 update(&snapshot, |s| {
                                     s.message = "密码已修改".into();
                                     s.ok = true;
                                 });
                             }
                             Err(e) => {
+                                tracing::warn!("password change failed: {e}");
                                 update(&snapshot, |s| {
                                     s.message = format!("保存失败: {}", e);
                                     s.ok = false;
@@ -253,6 +258,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         "lock" => {
                             if !backend.is_locked() {
                                 backend.start_lock()?;
+                                tracing::info!("locked by command file");
                                 keypad.reset();
                                 update(&snapshot, |s| {
                                     s.locked = true;
@@ -359,6 +365,7 @@ fn handle_keypad_action(
             if pwd == config.password {
                 perform_unlock("password", keypad, backend, controller, snapshot);
             } else {
+                tracing::warn!("unlock rejected: wrong password");
                 keypad.cancel_unlock_mode();
                 update(snapshot, |s| {
                     s.unlock_mode = false;
@@ -396,6 +403,13 @@ fn perform_unlock(
 ) {
     let now = Utc::now();
     let (ok, msg) = controller.unlock(backend, reason, now);
+    // A lock transition only ever changed the UI snapshot, which no rig can
+    // read — so every transition leaves a line here, with its reason.
+    if ok {
+        tracing::info!("unlocked ({reason})");
+    } else {
+        tracing::warn!("unlock failed ({reason}): {msg}");
+    }
     keypad.cancel_unlock_mode();
     let msg = unlock_display(ok, msg);
     update(snapshot, |s| {
