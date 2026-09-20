@@ -72,6 +72,42 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
     macos::grab(tx)
 }
 
+/// Liveness watchdog for backends that own a native message loop.
+///
+/// Windows removes a low-level hook whose callback exceeds
+/// `LowLevelHooksTimeout` and never notifies the process, so the only
+/// observable signal is that the hook thread stops answering probes.  A
+/// backend feeds probe responses in with [`Liveness::seen`] and treats
+/// [`Liveness::stalled`] as "capture is no longer reliable".
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+pub(crate) struct Liveness {
+    deadline: Duration,
+    last_seen: std::time::Instant,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Liveness {
+    /// Arm at `now`; a fresh watchdog is stalled once `deadline` passes with
+    /// no probe response, so a thread that never answers is still detected.
+    pub(crate) fn new(deadline: Duration, now: std::time::Instant) -> Self {
+        Self {
+            deadline,
+            last_seen: now,
+        }
+    }
+
+    /// Record a probe response.
+    pub(crate) fn seen(&mut self, now: std::time::Instant) {
+        self.last_seen = now;
+    }
+
+    /// True once no probe has been answered within `deadline`.
+    pub(crate) fn stalled(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.last_seen) > self.deadline
+    }
+}
+
 // Helper: thread join with timeout using crossbeam.
 trait JoinTimeout {
     fn join_timeout(self, timeout: Duration) -> thread::Result<()>;
@@ -91,5 +127,25 @@ impl JoinTimeout for JoinHandle<()> {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Liveness;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn liveness_flags_a_silent_thread() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(Duration::from_secs(1), start);
+        assert!(!liveness.stalled(start + Duration::from_millis(999)));
+        assert!(liveness.stalled(start + Duration::from_millis(1001)));
+
+        // Any probe response re-arms the deadline.
+        let pong = start + Duration::from_secs(5);
+        liveness.seen(pong);
+        assert!(!liveness.stalled(pong + Duration::from_millis(999)));
+        assert!(liveness.stalled(pong + Duration::from_millis(1001)));
     }
 }

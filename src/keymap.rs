@@ -68,8 +68,10 @@ pub mod evdev {
     }
 }
 
-// Windows virtual keycode -> RawKey
-#[cfg(target_os = "windows")]
+// Windows virtual keycode -> RawKey.
+//
+// Not gated on `target_os`: the mapping and the auto-repeat state machine are
+// pure data, so they compile and run their tests on every host.
 pub mod win {
     use super::RawKey;
 
@@ -89,6 +91,76 @@ pub mod win {
             0x30..=0x39 => RawKey::Digit((vk - 0x30) as u8),
             0x41..=0x5A => RawKey::Letter((vk as u8).to_ascii_lowercase() as char),
             _ => RawKey::Other,
+        }
+    }
+
+    // Low-level hook message codes, spelled out here so this mapping does not
+    // depend on the Windows-only `windows` crate.
+    pub const WM_KEYDOWN: u32 = 0x0100;
+    pub const WM_KEYUP: u32 = 0x0101;
+    pub const WM_SYSKEYDOWN: u32 = 0x0104;
+    pub const WM_SYSKEYUP: u32 = 0x0105;
+
+    /// What one `WH_KEYBOARD_LL` record means for the shared [`Keypad`].
+    ///
+    /// [`Keypad`]: crate::keypad::Keypad
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Transition {
+        /// A physical key went down for the first time.
+        Press(RawKey),
+        /// Shift went up; reported even when the press predates the grab.
+        ShiftRelease,
+        /// Auto-repeat, a key-up that produces no event, or an unmapped key.
+        Ignore,
+    }
+
+    /// Windows repeats `WM_KEYDOWN` while a key is held (evdev reports such
+    /// repeats as `value == 2`), so presses must be de-duplicated here.
+    #[derive(Debug, Clone)]
+    pub struct HeldKeys {
+        down: [bool; 256],
+    }
+
+    impl HeldKeys {
+        pub fn new() -> Self {
+            Self { down: [false; 256] }
+        }
+
+        /// Feed one `WH_KEYBOARD_LL` record and get the normalized transition.
+        pub fn record(&mut self, msg: u32, vk: u32) -> Transition {
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+            if !down && !up {
+                return Transition::Ignore;
+            }
+            let Some(held) = self.down.get_mut(vk as usize) else {
+                return Transition::Ignore;
+            };
+            let raw = to_raw(vk);
+            if down {
+                if *held {
+                    return Transition::Ignore; // auto-repeat
+                }
+                *held = true;
+                if raw == RawKey::Other {
+                    Transition::Ignore
+                } else {
+                    Transition::Press(raw)
+                }
+            } else {
+                *held = false;
+                if raw == RawKey::ShiftLeft || raw == RawKey::ShiftRight {
+                    Transition::ShiftRelease
+                } else {
+                    Transition::Ignore
+                }
+            }
+        }
+    }
+
+    impl Default for HeldKeys {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }
@@ -210,7 +282,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
     fn win_maps_qwerty() {
         use super::win;
         assert_eq!(win::to_raw(0x41), RawKey::Letter('a'));
@@ -218,7 +289,52 @@ mod tests {
         assert_eq!(win::to_raw(0x30), RawKey::Digit(0));
         assert_eq!(win::to_raw(0x39), RawKey::Digit(9));
         assert_eq!(win::to_raw(win::VK_BACK), RawKey::Backspace);
+        assert_eq!(win::to_raw(win::VK_RETURN), RawKey::Enter);
         assert_eq!(win::to_raw(win::VK_CAPITAL), RawKey::CapsLock);
+        assert_eq!(win::to_raw(win::VK_LSHIFT), RawKey::ShiftLeft);
+        assert_eq!(win::to_raw(win::VK_RSHIFT), RawKey::ShiftLeft);
+    }
+
+    #[test]
+    fn win_dedups_auto_repeat() {
+        use super::win::{HeldKeys, Transition, WM_KEYDOWN, WM_KEYUP};
+        let mut held = HeldKeys::new();
+        let press = Transition::Press(RawKey::Letter('j'));
+        assert_eq!(held.record(WM_KEYDOWN, 0x4A), press);
+        // Windows keeps sending WM_KEYDOWN while the key is held.
+        assert_eq!(held.record(WM_KEYDOWN, 0x4A), Transition::Ignore);
+        assert_eq!(held.record(WM_KEYUP, 0x4A), Transition::Ignore);
+        // After a real release the next press counts again.
+        assert_eq!(held.record(WM_KEYDOWN, 0x4A), press);
+    }
+
+    #[test]
+    fn win_reports_shift_release_once() {
+        use super::win::{HeldKeys, Transition, VK_LSHIFT, WM_KEYDOWN, WM_KEYUP};
+        let mut held = HeldKeys::new();
+        assert_eq!(
+            held.record(WM_KEYDOWN, VK_LSHIFT),
+            Transition::Press(RawKey::ShiftLeft)
+        );
+        assert_eq!(held.record(WM_KEYUP, VK_LSHIFT), Transition::ShiftRelease);
+    }
+
+    #[test]
+    fn win_shift_release_without_press_still_reports() {
+        // Shift held before the lock must still clear the shared Keypad state.
+        use super::win::{HeldKeys, Transition, VK_RSHIFT, WM_KEYUP};
+        let mut held = HeldKeys::new();
+        assert_eq!(held.record(WM_KEYUP, VK_RSHIFT), Transition::ShiftRelease);
+    }
+
+    #[test]
+    fn win_ignores_unmapped_and_out_of_range_keys() {
+        use super::win::{HeldKeys, Transition, WM_KEYDOWN, WM_KEYUP};
+        let mut held = HeldKeys::new();
+        assert_eq!(held.record(WM_KEYDOWN, 0x70), Transition::Ignore); // F1
+        assert_eq!(held.record(WM_KEYDOWN, 0x1234), Transition::Ignore);
+        assert_eq!(held.record(WM_KEYUP, 0x70), Transition::Ignore);
+        assert_eq!(held.record(0x0200, 0x41), Transition::Ignore); // not a key msg
     }
 
     #[test]
