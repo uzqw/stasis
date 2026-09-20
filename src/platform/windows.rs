@@ -30,12 +30,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, bounded};
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_REMOVE,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE,
     PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT, WM_USER,
 };
 
 use crate::keymap::win::{HeldKeys, Transition, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
@@ -136,11 +137,18 @@ struct Hooks {
 impl Hooks {
     /// Install both hooks.  Must run on the thread that will pump messages.
     unsafe fn install() -> Result<Self, String> {
-        // SAFETY: both procedures match HOOKPROC; `hMod` is NULL for
-        // in-process low-level hooks.
-        let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0) }
-            .map_err(|e| format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}"))?;
-        let mouse = match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) } {
+        // Low-level hooks inject no DLL, but MSDN warns that "an error may
+        // occur if the hMod parameter is NULL and the dwThreadId parameter is
+        // zero", which is exactly this call, so the module handle is passed.
+        let module = unsafe { GetModuleHandleW(None) }
+            .map_err(|e| format!("GetModuleHandleW failed: {e}"))?;
+        let instance = Some(HINSTANCE(module.0));
+        // SAFETY: both procedures match HOOKPROC; `instance` is this
+        // executable's module handle.
+        let keyboard =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), instance, 0) }
+                .map_err(|e| format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}"))?;
+        let mouse = match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), instance, 0) } {
             Ok(hook) => hook,
             Err(e) => {
                 // Partial install must roll back, not leave the pointer hooked.
@@ -178,10 +186,11 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
         let tid = unsafe { GetCurrentThreadId() };
         hook_thread_id.store(tid, Ordering::Relaxed);
         // Force the message queue into existence before the watchdog can post
-        // a probe to this thread.
+        // a probe to this thread.  MSDN's idiom filters on `WM_USER` with
+        // `PM_NOREMOVE`, so this call cannot consume anything.
         unsafe {
             let mut msg = MSG::default();
-            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+            let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
         }
         HOOK.with(|state| {
             let mut state = state.borrow_mut();

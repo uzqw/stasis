@@ -41,7 +41,8 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
   x86_64-pc-windows-gnu --all-targets -- -D warnings` 通过，`cargo build --release --target
   x86_64-pc-windows-gnu` 产出 PE32+ 的 `stasis.exe`（`file` 确认），exe 清单已核对为
   `asInvoker`（`.rsrc` 里有 `requestedExecutionLevel level="asInvoker"`）。钩子超时/静默移除
-  只能检测可观测的前置条件，依据见 [design.md](docs/design.md) §2.4；真实行为未验证。
+  只能检测可观测的前置条件，依据见 [design.md](docs/design.md) §2.4；真实行为未验证。不提权
+  运行还受 UIPI 限制：发往提权进程与 UAC 安全桌面的输入看不到也拦不住，「完整锁定」尚无依据。
   **交叉编译通过不等于功能验证。**
 - **macOS**：未实现。
 - Linux 端尚未覆盖的回归用例（热插拔、半数设备抓取失败、时钟跳变等）见
