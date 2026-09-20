@@ -432,6 +432,15 @@ where
 {
     if let Ok(mut s) = snapshot.lock() {
         f(&mut s);
+        // ponytail: debug state dump for SSH verification; ~1 write per state
+        // change, harmless on all platforms
+        if let Some(home) = std::env::var_os("HOME") {
+            let p = std::path::Path::new(&home).join(".stasis-state");
+            let _ = std::fs::write(
+                p,
+                format!("locked={} msg={} ok={}", s.locked, s.message, s.ok),
+            );
+        }
     }
 }
 
