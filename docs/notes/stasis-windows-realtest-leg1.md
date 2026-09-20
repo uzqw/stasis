@@ -35,6 +35,13 @@ test-only value in `%APPDATA%\stasis\config.json` (not a user secret).
   swallow probe* — inject `mouse_event(MOVE)` and read `Cursor.Position`.
   0 px moved = hook installed and swallowing; movement = hook released. This
   removes the need to ask the operator whether the mouse "still works".
+- Third, independent channel: **ActivityWatch on the target** (`aw-server`,
+  `aw-watcher-afk`, `aw-watcher-window`, already running). Query
+  `http://localhost:5600/api/0/buckets/<bucket>/events?start=…&end=…`, and
+  read the `Became AFK` / `No longer AFK` lines in
+  `Logs\aw-watcher-afk\*.log` (180 s timeout). It answers "was anyone at
+  this machine at time T" without asking the operator, and it keeps
+  answering while the lock swallows input.
 
 ## Per-case results
 
@@ -72,17 +79,22 @@ events dir stayed empty.
    restart the operator confirmed they did not click 锁定系统 again, so the
    machine was never locked and keys never entered the app. With the lock
    engaged, physical `j`×3 armed unlock mode on the first attempt.
-3. **A later burst of operator key presses left no trace in the hook path.**
-   Between the arming (12:56:00) and the next probe (13:04) the engine
-   received nothing from the physical path, while injected keys still reached
-   it and both hooks were demonstrably live; no elevated process existed, so
-   the UIPI boundary was not the cause. That input was therefore never
-   delivered to session 1's hook chain (most plausibly typed on another
-   device). The exact input path could not be established from the machine —
-   this backend logs no per-key data by design, which is what made it slow to
-   diagnose. A temporary diagnostic build (raw `msg`/`vk`/`scan`/`flags` at
-   `debug`, reverted before commit) confirmed the hook chain was live
-   throughout.
+3. **The reported "later burst of operator key presses" was never typed on
+   this machine.** ActivityWatch gives a minute-resolution input timeline:
+   after the last input at ~12:57:23 (this leg's own injected probe) the
+   idle timer was not refreshed until 13:00:38 — **3 min 15 s with no input
+   of any kind**, exactly the stretch in which the operator reported that
+   keys did nothing. The injected probe refreshed the timer while both hooks
+   were swallowing, so the timer is not blind to hook-swallowed input. The
+   window watcher agrees: `stasis.exe` held the foreground at every operator
+   chat message in that window, so those messages came from another device,
+   and the operator's one real touch (13:00:38) was swallowed as designed.
+   The physical path itself is proven by the 12:56:00 gesture, and the
+   machine has exactly one USB keyboard and one USB mouse, so no KVM or
+   vendor input router is involved. Method note: the earlier evidence
+   (password-dot count in a screenshot) could not separate "never delivered"
+   from "delivered but unmapped", and this backend logs no per-key data by
+   design — that is what made the episode slow to diagnose.
 4. **No log line covers the lock path itself.** `UiCmd::Lock`,
    `start_lock()` outcomes and the command-file lock all change only the UI
    snapshot, so "was it ever locked?" cannot be answered from the log alone.
