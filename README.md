@@ -12,8 +12,8 @@ Input Locker 的 Rust 重写项目：暂停键盘、鼠标输入，让人休息�
 
 ## 当前状态
 
-Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到端验证；Windows 与 macOS 尚未实
-现，属于未来工作，不作为已验证能力声明。
+Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到端验证。Windows 输入后端已实现，
+但**未在真机验证**（见下）；macOS 尚未实现。这两项都不作为已验证能力声明。
 
 解锁手势（2026-09-14 起）为 **2 秒内连按 3 次 `j`**；下文 2026-09-13 记录中的 CapsLock×3 是当时的
 行为，已不再生效。
@@ -36,7 +36,14 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
 
 ### 尚未验证 / 未来工作
 
-- **Windows、macOS**：无实现、未验证。
+- **Windows 真机验证（未做）**：输入后端（`src/platform/windows.rs`）已实现，但本机没有
+  Windows，从未运行过真机 grab/解锁。目前只有：`cargo clippy --target
+  x86_64-pc-windows-gnu --all-targets -- -D warnings` 通过，`cargo build --release --target
+  x86_64-pc-windows-gnu` 产出 PE32+ 的 `stasis.exe`（`file` 确认），exe 清单已核对为
+  `asInvoker`（`.rsrc` 里有 `requestedExecutionLevel level="asInvoker"`）。钩子超时/静默移除
+  只能检测可观测的前置条件，依据见 [design.md](docs/design.md) §2.4；真实行为未验证。
+  **交叉编译通过不等于功能验证。**
+- **macOS**：未实现。
 - Linux 端尚未覆盖的回归用例（热插拔、半数设备抓取失败、时钟跳变等）见
   [implementation-plan.md](docs/implementation-plan.md) 的回归用例表。
 - 安装包、自启动、签名/权限引导等交付项（阶段 4）未完成；当前仅有 `cargo build --release`
