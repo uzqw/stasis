@@ -131,17 +131,15 @@ extern "C" fn tick(_timer: CFRunLoopTimerRef, info: *mut c_void) {
 }
 
 pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
-    // Preflight so the failure can name the fix; the tap creation below
-    // remains the source of truth.
+    // Preflight only triggers the system prompt on first run; it is NOT
+    // the gate.  On macOS 26 the preflight result is cached per process
+    // and does not go live-update after the user grants access, so a
+    // stale `false` here must not stop us — `CGEventTapCreate` returning
+    // NULL is the real verdict (Quinn, Apple DTS).
     // SAFETY: no pointers involved.
     if !unsafe { CGPreflightPostEventAccess() } {
         // SAFETY: no pointers involved.
         let _ = unsafe { CGRequestPostEventAccess() };
-        anyhow::bail!(
-            "macOS Accessibility permission is required to capture input; \
-             grant it under System Settings → Privacy & Security → \
-             Accessibility, then retry"
-        );
     }
 
     let stop = Arc::new(AtomicBool::new(false));
