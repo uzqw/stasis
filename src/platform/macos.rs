@@ -81,6 +81,11 @@ unsafe extern "C" {
     /// Re-enable a tap.  `CGEventTap` keeps the port private, so the
     /// callback reaches it through this FFI instead.
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    /// Connect or disconnect the mouse from the on-screen cursor.
+    /// Dropping `mouseMoved` events only hides them from apps; the
+    /// WindowServer still moves the cursor from the same HID reports.
+    /// Disconnecting is what actually freezes the pointer.
+    fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
 }
 
 thread_local! {
@@ -325,6 +330,12 @@ fn run_tap(
     unsafe { run_loop.add_timer(&timer, kCFRunLoopCommonModes) };
 
     tap.enable();
+
+    // Dropping mouseMoved hides it from apps but the cursor still tracks
+    // the HID reports; decouple it so the lock owns the pointer too.
+    // SAFETY: plain FFI, no pointers.
+    unsafe { CGAssociateMouseAndMouseCursorPosition(false) };
+
     let _ = ready_tx.send(Ok(()));
 
     CFRunLoop::run_current();
@@ -332,6 +343,11 @@ fn run_tap(
     // The run loop has exited, so neither callout can fire again; the
     // context and the tap may now be dropped.  `tap`'s Drop invalidates
     // the mach port.
+    // Reconnect the cursor before releasing the tap so the pointer is
+    // never left frozen if we exit unexpectedly.
+    // SAFETY: plain FFI, no pointers.
+    unsafe { CGAssociateMouseAndMouseCursorPosition(true) };
+
     TAP_PORT.with(|p| *p.borrow_mut() = std::ptr::null_mut());
     drop(timer);
     drop(tick_ctx);
