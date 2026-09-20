@@ -298,6 +298,43 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         s.ok = ok;
                     });
                 }
+
+                // ponytail: debug command file for headless verification;
+                // ~/.stasis-cmd containing "lock"/"unlock" is consumed and
+                // deleted once per second. Harmless when absent.
+                if let Some(home) = std::env::var_os("HOME") {
+                    let cmd_path = std::path::Path::new(&home).join(".stasis-cmd");
+                    if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
+                        let _ = std::fs::remove_file(&cmd_path);
+                        match cmd.trim() {
+                            "lock" if !backend.is_locked() => {
+                                if let Err(e) = backend.start_lock() {
+                                    update(&snapshot, |s| {
+                                        s.message = format!("锁定失败: {}", e);
+                                        s.ok = false;
+                                    });
+                                } else {
+                                    keypad.reset();
+                                    update(&snapshot, |s| {
+                                        s.locked = true;
+                                        s.message = "已锁定".into();
+                                        s.ok = true;
+                                    });
+                                }
+                            }
+                            "unlock" if backend.is_locked() => {
+                                perform_unlock(
+                                    "manual",
+                                    &mut keypad,
+                                    &mut backend,
+                                    &mut controller,
+                                    &snapshot,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // Poll command file (throttled to avoid blocking the engine loop)
                 if Instant::now().duration_since(last_poll) >= POLL_INTERVAL {
                     last_poll = Instant::now();
