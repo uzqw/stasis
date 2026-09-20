@@ -19,7 +19,6 @@ pub struct Snapshot {
     pub message: String,
     pub ok: bool,
     pub events_dir: PathBuf,
-    pub focus_request: u64,
 }
 
 impl Snapshot {
@@ -31,7 +30,6 @@ impl Snapshot {
             message: String::new(),
             ok: true,
             events_dir,
-            focus_request: 0,
         }
     }
 }
@@ -40,7 +38,13 @@ impl Snapshot {
 pub enum UiCmd {
     Lock,
     Unlock,
-    ChangePassword { old: String, new: String },
+    /// Input reached the app window while locked: capture is no longer
+    /// reliable.  Re-arm the grab instead of silently leaking keystrokes.
+    Rehook,
+    ChangePassword {
+        old: String,
+        new: String,
+    },
     Exit,
 }
 
@@ -97,6 +101,16 @@ impl LockOps for BackendHandle {
         self.state = BackendState::Idle;
         self._keepawake = None;
         Ok(())
+    }
+}
+
+impl BackendHandle {
+    /// Replace the running grab with a fresh one, keeping the lock.  A fresh
+    /// hook is the only remedy available for a backend that stopped seeing
+    /// input, and the new grab also re-runs the platform's foreground handoff.
+    fn restart_grab(&mut self) -> anyhow::Result<()> {
+        self.stop_lock()?;
+        self.start_lock()
     }
 }
 
@@ -189,6 +203,40 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                             &mut controller,
                             &snapshot,
                         );
+                    }
+                }
+                Ok(UiCmd::Rehook) => {
+                    if backend.is_locked() {
+                        // Keystrokes that went to the window were never
+                        // captured, so the buffer is missing characters: say so
+                        // instead of comparing a silently wrong password.
+                        tracing::warn!(
+                            "input reached the window while locked; re-arming input capture"
+                        );
+                        keypad.clear_password();
+                        match backend.restart_grab() {
+                            Ok(()) => {
+                                tracing::info!("input capture re-armed");
+                                update(&snapshot, |s| {
+                                    s.password_len = 0;
+                                    s.message = "输入已重新捕获 — 请重新输入密码".into();
+                                    s.ok = true;
+                                });
+                            }
+                            Err(e) => {
+                                // Without capture there is no lock to claim.
+                                tracing::warn!("re-arming input capture failed: {e}");
+                                let _ = backend.stop_lock();
+                                keypad.device_lost();
+                                update(&snapshot, |s| {
+                                    s.locked = false;
+                                    s.unlock_mode = false;
+                                    s.password_len = 0;
+                                    s.message = format!("重新捕获输入失败，已解除锁定: {e}");
+                                    s.ok = false;
+                                });
+                            }
+                        }
                     }
                 }
                 Ok(UiCmd::ChangePassword { old, new }) => {
@@ -350,7 +398,6 @@ fn handle_keypad_action(
             update(snapshot, |s| {
                 s.unlock_mode = true;
                 s.password_len = 0;
-                s.focus_request = s.focus_request.wrapping_add(1);
                 s.message = "解锁模式已开启 — 请输入密码".into();
                 s.ok = true;
             });

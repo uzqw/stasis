@@ -86,6 +86,76 @@ Screenshots: [locked + armed](stasis-win-leg1-locked.png),
 manual lock/unlock — correct, there is no active rest session; the isolated
 events dir stayed empty.
 
+## Fix and re-verification (same day, after the record above)
+
+Root cause of the operator's report («`j`×3 arms unlock mode, then the password
+does nothing; `Tab` then `Enter` is the only way out»): **Windows stops calling
+the low-level keyboard hook while a window of the hooking process owns the
+foreground.** With the lock window focused, every key is delivered straight to
+that window: the engine never sees it, and egui — which is what `Tab`+`Enter`
+reached — still activates 强制解锁（UI）. That is exactly the `unlocked (manual)`
+pair at 14:48/14:50 in the log: injected input, not a mouse click.
+
+Evidence (one instance, per-key diagnostic build, 15:22–15:23 local, lines from
+`%APPDATA%\stasis\stasis.log.2026-09-20`):
+
+- `j`×3 while another process held the foreground: every raw key logged with
+  `age_ms=0`, then `unlock mode armed by gesture`.
+- The lock window takes the foreground (winit's `force_window_active`: an
+  injected `VK_LMENU` pair plus `SetForegroundWindow`, triggered by the arming
+  code's own `ViewportCommand::Focus`). The next key produced **no** raw-key
+  line, while the UI thread logged
+  `ui saw key press while locked (hook leak)` for that same key.
+- `UnhookWindowsHookEx` at the end still reported the hook as attached: Windows
+  had not removed it, it simply was not called.
+- Minimising our own window (same hook, nothing reinstalled): the next key was
+  logged and reached the engine again.
+- Restoring the window *without* giving it the foreground: still captured, as
+  were the operator's physical backspaces in the same window.
+
+So this is not a hook timeout, not the USB switch and not a lost event: it is
+foreground ownership. Three small changes:
+
+- `src/ui.rs` no longer sends `ViewportCommand::Focus` when the gesture arms
+  (the `focus_request` field is gone). The window stays `AlwaysOnTop`, so the
+  state is still visible, but it never takes the keyboard focus.
+- `src/platform/windows.rs` `release_foreground()` runs right after the hooks
+  are installed and hands the foreground to the next visible window in the
+  z-order that is not ours. This covers the operator's own path — locking with
+  the 锁定系统 button — where the window already holds the focus.
+- Safety net: while locked, a key that reaches egui is proof capture stopped.
+  `src/ui.rs` sends `UiCmd::Rehook`, the engine logs
+  `input reached the window while locked; re-arming input capture`, rebuilds the
+  grab (which re-runs the foreground handoff) and clears the partially typed
+  password, so the next `Enter` cannot compare a buffer that is silently missing
+  characters. If the re-arm fails, the lock is released instead of pretending.
+
+Re-verification on the same machine (build `stasis.exe` sha256 `7aa064b0…44613a`,
+installed over the leg-1 binary; per-key logging reverted before the build, so
+the evidence is the production `info` log):
+
+| Path | Result |
+| --- | --- |
+| 锁定系统 via UI with the window focused | PASS — `locked by ui`, foreground handed to another process, mouse swallowed (0 px) |
+| that lock, then `j`×3 + `abc123`+Enter | PASS — `unlock mode armed by gesture`, `unlocked (password)`, no leak line, hooks released (617 px) |
+| command-file lock, then `j`×3 + password | PASS — `unlocked (password)` |
+| forced failure: our window pushed back to the foreground while locked | PASS — one leak line, `input capture re-armed`, foreground moved away, keys captured again |
+
+Findings updated:
+
+1. **was: 「强制解锁（UI）」 is unusable while locked.** Still unreachable, now
+   for a second reason: with capture healthy the keyboard is swallowed again, so
+   `Tab` is an unmapped key and `Enter` submits the password buffer. While the
+   lock works the button is mouse-only and the mouse hook eats the click; the
+   in-app path is the password, out-of-band recovery stays the command file and
+   killing the process.
+5. **follow-up.** A keyup without its keydown means the hook was not called for
+   that event and the event went to the target window instead — the same
+   observable family as the foreground leak above (both are «hook not called,
+   key delivered»). The 14:21 window had two instances writing one log file, so
+   that single event stays unattributed; it no longer needs a separate
+   explanation.
+
 ## Findings
 
 1. **「强制解锁（UI）」 is unusable while locked.** The mouse hook swallows
@@ -154,9 +224,15 @@ events dir stayed empty.
 
 - The manual round typed the password by hand; the injected run kept the
   plaintext out of every file by reading it from the config inside the
-  injector. Note that a successful unlock writes **no** log line either, so
-  the manual round rests on the operator's confirmation plus the oracle
-  flipping from 0 px to 470 px.
+  injector. Successful unlocks are logged as `unlocked (password)` /
+  `unlocked (manual)` / `unlocked (command)` since commit `18be1c9`, so the
+  manual round rests on that line plus the operator's confirmation and the
+  oracle flipping from 0 px to 470 px.
+- The target desktop's `stasis.exe` is now the fixed build (`7aa064b0…44613a`,
+  the commit that follows `18be1c9`); the leg-1 sha256 `ed5882be…8ddd07` above
+  stays as the historical artifact this record was written against.
 - Both hooks live for the whole lock; the watchdog's stall detection and the
-  `Grab` join timeout were never exercised on this machine.
+  `Grab` join timeout were never exercised on this machine, and the new
+  re-arm path is exercised only by forcing the foreground back onto our own
+  window.
 - Session 0 / session 1 separation is a property of this rig, not of the app.
