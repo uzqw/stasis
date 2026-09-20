@@ -75,18 +75,19 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
 /// Liveness watchdog for backends that own a native message loop.
 ///
 /// Windows removes a low-level hook whose callback exceeds
-/// `LowLevelHooksTimeout` and never notifies the process, so the only
-/// observable signal is that the hook thread stops answering probes.  A
-/// backend feeds probe responses in with [`Liveness::seen`] and treats
-/// [`Liveness::stalled`] as "capture is no longer reliable".
-#[cfg(any(target_os = "windows", test))]
+/// `LowLevelHooksTimeout` and never notifies the process; a wedged macOS
+/// run loop goes just as silent, so the only observable signal is that
+/// the backend thread stops answering probes.  A backend feeds probe
+/// responses in with [`Liveness::seen`] and treats [`Liveness::stalled`]
+/// as "capture is no longer reliable".
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 #[derive(Debug)]
 pub(crate) struct Liveness {
     deadline: Duration,
     last_seen: std::time::Instant,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 impl Liveness {
     /// Arm at `now`; a fresh watchdog is stalled once `deadline` passes with
     /// no probe response, so a thread that never answers is still detected.
