@@ -145,6 +145,13 @@ impl Keypad {
         self.trigger_times.clear();
     }
 
+    /// Drop a partially typed password but stay armed.  Called when the backend
+    /// reports lost keystrokes, so the next `Enter` cannot compare a buffer
+    /// that is silently missing characters.
+    pub fn clear_password(&mut self) {
+        self.password.clear();
+    }
+
     /// Call when the input device is lost or backend exits unexpectedly.
     /// Clears transient state (shift, gesture tracking) but preserves password
     /// and unlock mode so the user can continue after reconnect.
@@ -305,6 +312,25 @@ mod tests {
             k.feed(now, RawKey::Letter('a'));
         }
         assert_eq!(k.password().len(), PASSWORD_MAX_LEN);
+    }
+
+    #[test]
+    fn clear_password_keeps_unlock_mode() {
+        let mut k = Keypad::new();
+        let now = Instant::now();
+        arm(&mut k, now);
+        k.feed(now, RawKey::Letter('x'));
+        assert_eq!(k.password(), "x");
+
+        k.clear_password();
+        assert!(k.password().is_empty());
+        assert!(k.is_unlock_mode());
+        // Typing resumes without re-arming the gesture.
+        assert_eq!(
+            k.feed(now, RawKey::Letter('y')),
+            Action::Password { len: 1 }
+        );
+        assert_eq!(k.password(), "y");
     }
 
     #[test]

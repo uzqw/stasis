@@ -72,9 +72,13 @@ pub struct App {
     new_password: String,
     confirm_password: String,
     show_change: bool,
-    last_focus: u64,
     on_top: bool,
+    last_leak: Option<std::time::Instant>,
 }
+
+/// Minimum spacing between two re-arm requests.  The first re-arm should
+/// restore capture; a burst of requests would only churn hook threads.
+const REARM_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl App {
     pub fn new(engine: Arc<Engine>) -> Self {
@@ -86,8 +90,8 @@ impl App {
             new_password: String::new(),
             confirm_password: String::new(),
             show_change: false,
-            last_focus: 0,
             on_top: false,
+            last_leak: None,
         }
     }
 }
@@ -102,12 +106,23 @@ impl eframe::App for App {
 
         let snap = self.snapshot.lock().unwrap().clone();
 
-        if snap.focus_request != self.last_focus {
-            self.last_focus = snap.focus_request;
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                egui::WindowLevel::AlwaysOnTop,
-            ));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // A locked backend swallows every key, so a key that reaches egui is
+        // proof capture stopped — Windows stops calling a low-level hook while
+        // its own process owns the foreground.  Ask the engine to re-arm; the
+        // keys that leaked were never captured, so the typed password is
+        // incomplete and the engine restarts the buffer.
+        if snap.locked
+            && ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+            })
+            && self
+                .last_leak
+                .is_none_or(|at| at.elapsed() >= REARM_COOLDOWN)
+        {
+            self.last_leak = Some(std::time::Instant::now());
+            self.engine.send(UiCmd::Rehook);
         }
 
         // Only touch the window level when it actually changes: sending a

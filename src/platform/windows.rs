@@ -30,13 +30,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, bounded};
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE,
-    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT, WM_USER,
+    CallNextHookEx, DispatchMessageW, GW_HWNDNEXT, GetForegroundWindow, GetMessageW, GetWindow,
+    GetWindowThreadProcessId, HHOOK, IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SetForegroundWindow, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT, WM_USER,
 };
 
 use crate::keymap::win::{HeldKeys, Transition, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
@@ -206,6 +207,8 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
                 return;
             }
         };
+        // SAFETY: no pointers are involved.
+        unsafe { release_foreground() };
         let _ = ready_tx.send(Ok(()));
 
         thread::spawn(move || watchdog(probe_stop, probe_thread_id, probes, probe_tx));
@@ -296,6 +299,53 @@ fn watchdog(
             return;
         }
     }
+}
+
+/// Windows stops calling a low-level keyboard hook while a window of the
+/// hooking process owns the foreground.
+///
+/// Measured on real hardware (2026-09-20): with the lock engaged, `j`×3 still
+/// armed unlock mode and every key after it went to the window instead of the
+/// hook, while a fresh `UnhookWindowsHookEx` reported the hook as still
+/// installed.  The same hook captured keys again the moment another process
+/// took the foreground — nothing had to be reinstalled.  The lock window is
+/// topmost but must never be the focused window, so before capture starts we
+/// hand the foreground to the next visible window in the z-order that is not
+/// ours.
+unsafe fn release_foreground() {
+    let ours = unsafe { GetCurrentProcessId() };
+    let mut current = unsafe { GetForegroundWindow() };
+    if current.is_invalid() || owner_of(current) != ours {
+        // Another process owns the foreground: nothing to hand over.
+        return;
+    }
+    // The z-order cannot cycle, but a bounded walk keeps that assumption out
+    // of the loop condition.
+    for _ in 0..64 {
+        let Ok(next) = (unsafe { GetWindow(current, GW_HWNDNEXT) }) else {
+            return;
+        };
+        current = next;
+        if current.is_invalid() {
+            return;
+        }
+        if !unsafe { IsWindowVisible(current).as_bool() } || unsafe { IsIconic(current).as_bool() }
+        {
+            continue;
+        }
+        if owner_of(current) != ours {
+            let _ = unsafe { SetForegroundWindow(current) };
+            return;
+        }
+    }
+}
+
+/// Process that owns a window.  Windows reports 0 when the window is gone.
+fn owner_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    // SAFETY: `hwnd` came from the z-order walk; `pid` is a live local.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid
 }
 
 /// Post a thread message, ignoring a failed post (the queue may be gone).
