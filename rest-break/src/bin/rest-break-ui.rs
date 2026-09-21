@@ -221,11 +221,12 @@ impl App {
                 }
             }
         }
-        // 与 ui() 手工布局同步：上 4 + 摘要 + 10 间距 + 明细行 + 下 4。
+        // 与 ui() 手工布局同步：上 6 + 摘要 + 10 间距 + 明细行 + 下 6。
+        // 描边有 ±1px 偏移，上下各留 6px 防止裁字。
         let height = if self.hover.expanded() {
-            4.0 + self.config.font_size + 10.0 + lines * (detail_size + 6.0) + 4.0
+            6.0 + self.config.font_size + 10.0 + lines * (detail_size + 6.0) + 6.0
         } else {
-            4.0 + self.config.font_size + 4.0
+            6.0 + self.config.font_size + 6.0
         };
         egui::vec2((width + 28.0).max(200.0), height)
     }
@@ -377,15 +378,11 @@ impl eframe::App for App {
             };
 
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::NONE
-                    .fill(egui::Color32::TRANSPARENT)
-                    .inner_margin(egui::Margin::same(10)),
-            )
+            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ui, |ui| {
                 let rect = ui.max_rect();
                 let cx = rect.center().x;
-                let mut y = rect.top() + 4.0 + self.config.font_size * 0.5;
+                let mut y = rect.top() + 6.0 + self.config.font_size * 0.5;
                 draw_line(
                     ui,
                     egui::pos2(cx, y),
