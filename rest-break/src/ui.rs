@@ -2,7 +2,7 @@
 //! 本模块不依赖 GUI（不引用 eframe），随 lib 默认编译，逻辑测试不引入 GUI 依赖；
 //! GUI 壳在 `src/bin/rest-break-ui.rs`（`ui` feature 下的独立 bin）。
 
-use chrono::DateTime;
+use chrono::{DateTime, Local};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -64,24 +64,31 @@ pub fn summary_line(s: &UiStatus) -> String {
     )
 }
 
-/// 详情字段（label, value）：完整展示 status.json 的九个字段。
+/// ISO 时间转系统本地时区显示（"MM-dd HH:mm"），与状态文件写入时区无关。
+fn local_time(iso_str: &str) -> String {
+    DateTime::parse_from_rfc3339(iso_str)
+        .map(|t| t.with_timezone(&Local).format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| iso_str.to_string())
+}
+
+/// 详情字段（label, value）：完整展示 status.json 的九个字段，时间列统一本地时区。
 pub fn detail_lines(s: &UiStatus) -> Vec<(String, String)> {
     vec![
         ("状态".into(), s.state.clone()),
         ("疲劳（分钟）".into(), minutes(s.fatigue_minutes)),
-        ("下次休息".into(), s.next_rest_at.clone()),
+        ("下次休息".into(), local_time(&s.next_rest_at)),
         ("休息时长（分钟）".into(), s.next_rest_minutes.to_string()),
         ("工作（分钟）".into(), minutes(s.work_minutes)),
         ("昼夜节律系数".into(), s.circadian.to_string()),
         ("原因".into(), s.reason.clone()),
-        ("检查时间".into(), s.checked_at.clone()),
+        ("检查时间".into(), local_time(&s.checked_at)),
         (
             "冷却截止".into(),
             s.cooldown_until
                 .as_deref()
                 .filter(|v| !v.is_empty())
-                .unwrap_or("-")
-                .to_string(),
+                .map(local_time)
+                .unwrap_or("-".to_string()),
         ),
     ]
 }

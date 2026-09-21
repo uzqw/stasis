@@ -11,7 +11,7 @@
 //! - `RB_UI_TEXT_COLOR`：`#rrggbb` 文本颜色，缺省纯白 `#ffffff`。
 
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,15 +76,32 @@ struct Config {
     margin: f32,
     font_size: f32,
     text_color: egui::Color32,
+    /// X11 全局坐标。双屏下 egui 的 monitor_size 不含原点，SE 会算错。
+    pos: Option<egui::Pos2>,
 }
 
 impl Config {
     fn from_env() -> Self {
+        // 缺省找 exe 同目录的状态文件：计划任务/启动项的 cwd 不可靠
+        // （Windows 上常落成 system32），./status.json 会读空。
+        // 同目录下依次试 rest-break-status.json（cron 写的名字）与 status.json。
         let status_path = std::env::var("STATUS_FILE")
             .ok()
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("./status.json"));
+            .unwrap_or_else(|| {
+                let dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| PathBuf::from("."));
+                for name in ["rest-break-status.json", "status.json"] {
+                    let p = dir.join(name);
+                    if p.is_file() {
+                        return p;
+                    }
+                }
+                dir.join("status.json")
+            });
         let corner = match std::env::var("RB_UI_CORNER").as_deref() {
             Ok("ne") => Corner::Ne,
             Ok("nw") => Corner::Nw,
@@ -103,12 +120,20 @@ impl Config {
             .ok()
             .and_then(|v| parse_color(&v))
             .unwrap_or(egui::Color32::WHITE);
+        let pos = match (
+            std::env::var("RB_UI_X").ok().and_then(|v| v.parse().ok()),
+            std::env::var("RB_UI_Y").ok().and_then(|v| v.parse().ok()),
+        ) {
+            (Some(x), Some(y)) => Some(egui::pos2(x, y)),
+            _ => None,
+        };
         Config {
             status_path,
             corner,
             margin,
             font_size,
             text_color,
+            pos,
         }
     }
 }
@@ -222,10 +247,12 @@ impl eframe::App for App {
 
         // 悬停展开与点击钉住在 `ui()` 里判定（需要指针与点击响应）。
 
-        // 首帧按配置角落定位（需要显示器尺寸，只能在 logic 里做）。
+        // 首帧定位：有 RB_UI_X/Y 用绝对坐标；否则按角落（单屏才准）。
         if !self.positioned {
             self.positioned = true;
-            if let Some(screen) = ctx.input(|i| i.viewport().monitor_size) {
+            if let Some(pos) = self.config.pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            } else if let Some(screen) = ctx.input(|i| i.viewport().monitor_size) {
                 let pos = corner_position(
                     self.config.corner,
                     self.config.margin,
@@ -237,9 +264,20 @@ impl eframe::App for App {
         }
 
         // 展开态切换时同步窗口高度；只在变化时发命令，避免每帧重绘循环。
+        // 向上展开：钉住窗口底边，只改高度，顶部随之上升，适合放在屏幕右下角。
+        let old_size = self.last_size;
         let size = self.window_size();
         if size != self.last_size {
             self.last_size = size;
+            if old_size.y > 0.0 {
+                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    let new_pos = egui::pos2(
+                        rect.min.x,
+                        rect.max.y - size.y - (rect.max.y - rect.min.y - old_size.y),
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
+                }
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
 
@@ -249,9 +287,9 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(ms));
         }
 
-        // 增长后若越出屏幕（底部/右侧），按需移回屏内；保持用户拖动的位置，
-        // 不无条件吸附回角落。每帧收敛一次，避免尺寸生效晚一帧导致偏移。
-        if let Some(screen) = ctx.input(|i| i.viewport().monitor_size)
+        // 绝对坐标时不要用 monitor_size 当 (0,0) 原点去夹——双屏会把窗口拽回左半边。
+        if self.config.pos.is_none()
+            && let Some(screen) = ctx.input(|i| i.viewport().monitor_size)
             && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
         {
             let mut pos = rect.min;
@@ -269,7 +307,7 @@ impl eframe::App for App {
         }
     }
 
-    /// 透明背景：eframe 默认用不透明视觉底色，会盖住桌面。
+    /// 全透明底：紫边圆角框在内容外渲染，透明区域不遮挡桌面。
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
@@ -310,7 +348,16 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
+            .frame(
+                egui::Frame::NONE
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::new(
+                        1.5,
+                        egui::Color32::from_rgb(138, 43, 226),
+                    ))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(8)),
+            )
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);

@@ -200,7 +200,10 @@ pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
         }
         locked += fatigue_seconds(start, end);
     }
-    fatigue_seconds(iv.start, iv.end) * 2.0 + locked * 4.0
+    let locked_ratio = locked / fatigue_seconds(iv.start, iv.end);
+    // 普通 AFK 恢复 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
+    // 在休息）；锁定区间 6 倍 → 系数 = 0.5 + 5.5×锁定覆盖率。
+    fatigue_seconds(iv.start, iv.end) * (0.5 + 5.5 * locked_ratio)
 }
 fn overlay(intervals: &[Interval], rests: &[Interval]) -> Vec<Interval> {
     if rests.is_empty() {
@@ -269,6 +272,7 @@ pub fn evaluate_observed(
 ) -> Result<(Decision, f64), String> {
     evaluate_with_freshness(events, sessions, history, now, Duration::minutes(5))
 }
+
 pub fn evaluate_with_freshness(
     events: &[Event],
     sessions: Option<&Value>,

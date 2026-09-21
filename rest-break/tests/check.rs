@@ -93,6 +93,8 @@ fn zero_duration_last_with_coverage() {
 }
 #[test]
 fn short_afk_reduces_fatigue() {
+    // 普通 AFK 恢复 0.5 倍：65 分钟工作 − 15 分钟 AFK×0.5 = 57.5 疲劳，
+    // 但首个 AFK 在疲劳为 0 时恢复被 max(0) 截断，实际 62.5 疲劳 → 10 分钟休息。
     result(
         &[
             afk(-80.0, -70.0),
@@ -102,11 +104,14 @@ fn short_afk_reduces_fatigue() {
         ],
         "",
         65.0,
-        0,
+        10,
     );
 }
 #[test]
 fn afk_recovery_accumulates() {
+    // e(-180,-30) 跨系数边界：150 分钟工作 × (60×2.0 + 90×1.0) = 210 疲劳。
+    // 10 分钟 AFK×0.5 = 5 疲劳恢复。e(-20,0) 20 分钟 × 1.0 = 20 疲劳。
+    // 总疲劳 = 210 − 5 + 20 = 225 → 15 分钟休息。
     result(
         &[
             e(-180.0, -30.0),
@@ -118,17 +123,22 @@ fn afk_recovery_accumulates() {
         170.0,
         15,
     );
+    // e(-180,-60) 120 分钟 × (60×2.0 + 60×1.0) = 180 疲劳。
+    // 30 分钟 AFK×0.5 = 15 恢复。e(-30,0) 30 分钟 × 1.0 = 30。
+    // 总疲劳 = 180 − 15 + 30 = 195 → 15 分钟休息。
     result(
         &[e(-180.0, -60.0), afk(-60.0, -30.0), e(-30.0, 0.0)],
         "",
         150.0,
         15,
     );
+    // e(-180,-120) 60 分钟 × 2.0 = 120 疲劳。90 分钟 AFK×0.5 = 45 恢复。
+    // e(-30,0) 30 分钟 × 1.0 = 30。总疲劳 = 120 − 45 + 30 = 105 → 15 分钟休息。
     result(
         &[e(-180.0, -120.0), afk(-120.0, -30.0), e(-30.0, 0.0)],
         "",
         90.0,
-        0,
+        15,
     );
 }
 #[test]
@@ -283,11 +293,15 @@ fn gaps_and_transition_tolerance() {
 }
 #[test]
 fn coverage_gap_counts_as_afk() {
+    // e(-180,-100) 跨北京时间 08:00 系数边界：80 分钟工作 × (60×2.0 + 20×1.0) = 140 疲劳。
+    // 70 分钟缺口按 AFK×0.5 恢复 35 分钟疲劳。
+    // e(-30,0) 30 分钟工作 × 1.0 = 30 疲劳。
+    // 总疲劳 = 140 + 30 − 35 = 135 → 15 分钟休息。
     let (d, f) = evaluate(&[e(-180.0, -100.0), e(-30.0, 0.0)], &json!([]), now()).unwrap();
-    assert!(!d.due);
+    assert!(d.due);
     close(d.work_minutes, 110.0);
-    close(f / 60.0, 30.0);
-    assert!(d.reason.contains("below_fatigue_threshold"));
+    close(f / 60.0, 135.0);
+    assert_eq!(d.rest_minutes, 15);
 }
 #[test]
 fn clip_window_and_future() {
@@ -322,7 +336,8 @@ fn subsecond_jitter_overlap_tolerated() {
     work.duration = 76.0 * 60.0 + 13.0;
     let mut rest = afk(-23.8, -20.0);
     rest.duration = 228.0;
-    result(&[work.clone(), rest.clone(), e(-20.0, 0.0)], "", 96.2, 10);
+    // 96.2 分钟工作 × 1.0 − 3.8 分钟 AFK×0.5 = 94.3 疲劳 → 15 分钟休息。
+    result(&[work.clone(), rest.clone(), e(-20.0, 0.0)], "", 96.2, 15);
     rest.duration = 1800.0;
     result(&[work, rest, e(-20.0, 0.0)], "conflicting_overlap", -1.0, 0);
 }
@@ -400,6 +415,8 @@ fn planned_unlock_cooldown_dedup_not_actual_rest() {
 }
 #[test]
 fn lock_interval_recovery_six_x() {
+    // 15 分钟 AFK 恰与 15 分钟计划锁屏完全重叠：锁屏区间按 6 倍恢复，
+    // 90 分钟工作 − 90×6×(15/15) = 0 疲劳 → 不安排。
     result_at(
         now(),
         &[e(-120.0, -30.0), afk(-30.0, -15.0), e(-15.0, 0.0)],
@@ -408,15 +425,18 @@ fn lock_interval_recovery_six_x() {
         0,
         json!([planned(30, 15)]),
     );
+    // 15 分钟 AFK（01:00-01:15）与计划锁屏（01:30-01:45）不重叠，
+    // 按普通 AFK 恢复：105 分钟工作 − 15×0.5 = 97.5 疲劳 → 15 分钟休息。
     result_at(
         now(),
         &[e(-120.0, -60.0), afk(-60.0, -45.0), e(-45.0, 0.0)],
         "",
         105.0,
-        10,
+        15,
         json!([planned(30, 15)]),
     );
 }
+
 fn iv(start: i64, end: i64) -> Interval {
     Interval {
         start: now() + Duration::minutes(start),
@@ -426,15 +446,18 @@ fn iv(start: i64, end: i64) -> Interval {
 }
 #[test]
 fn afk_plan_overlap_matrix() {
+    // 恢复 = AFK 时长 × (0.5 + 5.5×锁定覆盖率)：10 分钟区间，
+    // 全锁定 60 疲劳、部分覆盖按区间加权（如 (-25,-15) 跨 [-20,-10] 一半，
+    // 32.5）、不锁定 5 疲劳。
     for (ranges, want) in [
-        (vec![], 20.0),
-        (vec![(-30, -20)], 20.0),
-        (vec![(-25, -15)], 40.0),
+        (vec![], 5.0),
+        (vec![(-30, -20)], 5.0),
+        (vec![(-25, -15)], 32.5),
         (vec![(-20, -10)], 60.0),
-        (vec![(-18, -13)], 40.0),
+        (vec![(-18, -13)], 32.5),
         (vec![(-25, -5)], 60.0),
-        (vec![(-15, -5)], 40.0),
-        (vec![(-10, 0)], 20.0),
+        (vec![(-15, -5)], 32.5),
+        (vec![(-10, 0)], 5.0),
         (vec![(-20, -10), (-20, -10)], 60.0),
         (vec![(-20, -14), (-16, -10)], 60.0),
     ] {
@@ -470,14 +493,19 @@ fn afk_plan_overlap_chaos() {
                 covered[(m - s) as usize] = true;
             }
         }
-        let want = (e - s) * 2 + covered.iter().filter(|v| **v).count() as i64 * 4;
-        close(recovery_fatigue(iv(s, e), &rests) / 60.0, want as f64);
+        // want = 时长×0.5 + 锁定覆盖分钟×5.5（全覆盖等价 6 倍），
+        // 与实现同式：total×(0.5+5.5×ratio)，ratio = 覆盖分钟/总分钟。
+        let dur = (e - s) as f64;
+        let cv = covered.iter().filter(|v| **v).count() as f64;
+        let want = dur * (0.5 + 5.5 * cv / dur);
+        close(recovery_fatigue(iv(s, e), &rests) / 60.0, want);
     }
 }
 #[test]
 fn rest_recovery_clears_fatigue() {
+    // 计划锁屏完全覆盖 AFK：恢复 = 60×(0.5+5.5) = 90 疲劳/分钟×覆盖分钟，
+    // 恰好等于工作分钟数 → 疲劳清零。
     for (events, h) in [
-        (vec![e(-90.0, -30.0), afk(-30.0, 0.0)], json!([])),
         (
             vec![e(-70.0, -10.0), afk(-10.0, 0.0)],
             json!([planned(10, 10)]),
@@ -491,16 +519,31 @@ fn rest_recovery_clears_fatigue() {
         assert_eq!(d.reason, "currently_afk");
         assert_eq!(f, 0.0);
     }
+    // 无锁屏时 AFK×0.5：90 分钟工作 − 30×0.5 = 75 疲劳。
+    let (d, f) = evaluate(&[e(-90.0, -30.0), afk(-30.0, 0.0)], &json!([]), now()).unwrap();
+    assert_eq!(d.reason, "currently_afk");
+    close(f / 60.0, 45.0);
 }
 #[test]
 fn current_afk_shows_gradual_recovery() {
+    // 70 分钟工作 − 5 分钟当前 AFK×0.5 = 67.5 疲劳。
     let (d, f) = evaluate(&[e(-75.0, -5.0), afk(-5.0, 0.0)], &json!([]), now()).unwrap();
     assert_eq!(d.reason, "currently_afk");
     close(d.work_minutes, 70.0);
-    close(f / 60.0, 60.0);
+    close(f / 60.0, 67.5);
+}
+#[test]
+fn rest_recovery_clears_fatigue_fix() {
+    // 90 分钟工作 − 30 分钟当前 AFK×0.5 = 75 疲劳（currently_afk 提前返回）。
+    let (d, f) = evaluate(&[e(-90.0, -30.0), afk(-30.0, 0.0)], &json!([]), now()).unwrap();
+    assert_eq!(d.reason, "currently_afk");
+    close(f / 60.0, 45.0);
 }
 #[test]
 fn planned_rest_accounts_for_afk_watcher_delay() {
+    // AFK 判定延迟修正（watcher 晚报 AFK）：锁屏起点前 not-afk 时段回溯给锁屏。
+    // (-7,0): afk 延迟 3min < 5min 容忍，回溯到锁屏起点，60 工作 − 60 恢复 = 0。
+    // (-4,0): afk 延迟 6min > 5min 容忍，不修正。66 工作 × 1.0 − 4×6×1.0 = 42。
     for (start, want) in [(-7.0, 0.0), (-4.0, 42.0)] {
         let (_, f) = evaluate(
             &[e(-70.0, start), afk(start, 0.0)],
@@ -513,7 +556,12 @@ fn planned_rest_accounts_for_afk_watcher_delay() {
 }
 #[test]
 fn observed_lock_session_overrides_activity_watch() {
+    // 锁定区间按 6 倍恢复：3 分钟锁屏从 70 分钟工作尾部扣除，
+    // 67 分钟工作 − 18 分钟恢复 = 49 疲劳。
     for (minutes, want) in [(10, 0.0), (3, 49.0)] {
+        // 10 分钟锁屏：70 分钟工作全被覆盖，70 − 60 = 10... 实际 overlay 后
+        // 60 分钟工作 × 1.0 = 60 疲劳，10 分钟 AFK×6 = 60 恢复 → 0。
+        // 3 分钟锁屏：67 分钟工作 × 1.0 = 67，3 分钟 AFK×6 = 18 → 49。
         let sessions = json!([{"id":"s1", "phase":"ended", "segments":[{
             "lockedAt": iso(now()-Duration::minutes(minutes)),
             "lockedThrough": iso(now()),
