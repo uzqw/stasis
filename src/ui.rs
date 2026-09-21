@@ -8,8 +8,17 @@ use crate::engine::{Engine, Snapshot, UiCmd};
 #[cfg(target_os = "linux")]
 const CJK_FONTS: &[(&str, u32)] = &[
     ("/usr/share/fonts/droid/DroidSansFallbackFull.ttf", 0),
+    (
+        "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf",
+        0,
+    ),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
+    // Fedora: google-noto-sans-cjk-vf-fonts
+    (
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+        0,
+    ),
     ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
     ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
 ];
