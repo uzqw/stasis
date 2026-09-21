@@ -221,10 +221,11 @@ impl App {
                 }
             }
         }
+        // 与 ui() 手工布局同步：上 4 + 摘要 + 10 间距 + 明细行 + 下 4。
         let height = if self.hover.expanded() {
-            46.0 + lines * (self.config.font_size + 8.0)
+            4.0 + self.config.font_size + 10.0 + lines * (detail_size + 6.0) + 4.0
         } else {
-            46.0
+            4.0 + self.config.font_size + 4.0
         };
         egui::vec2((width + 28.0).max(200.0), height)
     }
@@ -347,51 +348,79 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        // 文字描边：8 方向紫色描边 + 前景色填充，与现役 tkinter overlay 同构。
+        // egui 没有文字 stroke，用 painter 手工画：先 8 个偏移副本再画正身。
+        const OUTLINE: egui::Color32 = egui::Color32::from_rgb(138, 43, 226);
+        let draw_line =
+            |ui: &mut egui::Ui, pos: egui::Pos2, text: &str, size: f32, fill: egui::Color32| {
+                let font = egui::FontId::proportional(size);
+                for (dx, dy) in [
+                    (-1.0, -1.0),
+                    (0.0, -1.0),
+                    (1.0, -1.0),
+                    (-1.0, 0.0),
+                    (1.0, 0.0),
+                    (-1.0, 1.0),
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                ] {
+                    ui.painter().text(
+                        pos + egui::vec2(dx, dy),
+                        egui::Align2::CENTER_CENTER,
+                        text,
+                        font.clone(),
+                        OUTLINE,
+                    );
+                }
+                ui.painter()
+                    .text(pos, egui::Align2::CENTER_CENTER, text, font, fill);
+            };
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
                     .fill(egui::Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::new(
-                        1.5,
-                        egui::Color32::from_rgb(138, 43, 226),
-                    ))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(8)),
+                    .inner_margin(egui::Margin::same(10)),
             )
             .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(self.summary())
-                                .color(self.config.text_color)
-                                .size(self.config.font_size),
-                        )
-                        .selectable(false),
-                    );
+                let rect = ui.max_rect();
+                let cx = rect.center().x;
+                let mut y = rect.top() + 4.0 + self.config.font_size * 0.5;
+                draw_line(
+                    ui,
+                    egui::pos2(cx, y),
+                    &self.summary(),
+                    self.config.font_size,
+                    self.config.text_color,
+                );
+                y += self.config.font_size + 10.0;
 
-                    if self.hover.expanded() {
-                        ui.add_space(6.0);
-                        match &self.status {
-                            Ok(s) => {
-                                for (k, v) in rest_break::ui::detail_lines(s) {
-                                    ui.label(
-                                        egui::RichText::new(format!("{k}: {v}"))
-                                            .color(self.config.text_color)
-                                            .size(self.config.font_size - 2.0),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                ui.label(
-                                    egui::RichText::new(format!("错误: {e}"))
-                                        .color(egui::Color32::LIGHT_RED)
-                                        .size(self.config.font_size - 2.0),
+                if self.hover.expanded() {
+                    let detail_size = self.config.font_size - 2.0;
+                    match &self.status {
+                        Ok(s) => {
+                            for (k, v) in rest_break::ui::detail_lines(s) {
+                                draw_line(
+                                    ui,
+                                    egui::pos2(cx, y),
+                                    &format!("{k}: {v}"),
+                                    detail_size,
+                                    self.config.text_color,
                                 );
+                                y += detail_size + 6.0;
                             }
                         }
+                        Err(e) => {
+                            draw_line(
+                                ui,
+                                egui::pos2(cx, y),
+                                &format!("错误: {e}"),
+                                detail_size,
+                                egui::Color32::LIGHT_RED,
+                            );
+                        }
                     }
-                });
+                }
             });
     }
 }
