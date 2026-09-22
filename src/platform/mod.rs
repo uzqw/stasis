@@ -72,6 +72,18 @@ pub fn grab(tx: Sender<BackendEvent>) -> anyhow::Result<Grab> {
     macos::grab(tx)
 }
 
+/// Hand the foreground to another window so the platform backend keeps
+/// receiving keys.  Windows stops delivering input to a low-level hook while
+/// the hooking process owns the foreground; other platforms have no such
+/// rule and this is a no-op.
+#[cfg(target_os = "windows")]
+pub fn release_foreground() {
+    unsafe { windows::release_foreground() }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn release_foreground() {}
+
 /// Liveness watchdog for backends that own a native message loop.
 ///
 /// Windows removes a low-level hook whose callback exceeds

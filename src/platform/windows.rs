@@ -312,7 +312,7 @@ fn watchdog(
 /// topmost but must never be the focused window, so before capture starts we
 /// hand the foreground to the next visible window in the z-order that is not
 /// ours.
-unsafe fn release_foreground() {
+pub(crate) unsafe fn release_foreground() {
     let ours = unsafe { GetCurrentProcessId() };
     let mut current = unsafe { GetForegroundWindow() };
     if current.is_invalid() || owner_of(current) != ours {

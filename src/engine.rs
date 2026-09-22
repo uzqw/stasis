@@ -432,6 +432,11 @@ fn handle_keypad_action(
     match action {
         Action::UnlockMode => {
             tracing::info!("unlock mode armed by gesture");
+            // Password keys arrive through the backend, not the window, so
+            // the window must not hold the foreground: Windows stops feeding
+            // a low-level hook while the hooking process owns it.  The
+            // gesture itself may have focused us, so hand it off again.
+            crate::platform::release_foreground();
             update(snapshot, |s| {
                 s.unlock_mode = true;
                 s.password_len = 0;
