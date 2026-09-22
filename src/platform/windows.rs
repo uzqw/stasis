@@ -34,10 +34,11 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GW_HWNDNEXT, GetForegroundWindow, GetMessageW, GetWindow,
-    GetWindowThreadProcessId, HHOOK, IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE,
-    PeekMessageW, PostThreadMessageW, SetForegroundWindow, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT, WM_USER,
+    CallNextHookEx, DispatchMessageW, GW_HWNDNEXT, GetForegroundWindow, GetMessageW,
+    GetShellWindow, GetWindow, GetWindowThreadProcessId, HHOOK, IsIconic, IsWindowVisible,
+    KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetForegroundWindow,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP,
+    WM_QUIT, WM_USER,
 };
 
 use crate::keymap::win::{HeldKeys, Transition, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
@@ -311,11 +312,15 @@ fn watchdog(
 /// took the foreground — nothing had to be reinstalled.  The lock window is
 /// topmost but must never be the focused window, so before capture starts we
 /// hand the foreground to the next visible window in the z-order that is not
-/// ours.
+/// ours.  When the desktop has been emptied there is no such window (observed
+/// 2026-09-21: `GetForegroundWindow` returned 0 while locked and the handoff
+/// silently did nothing, starving the hook), so the walk falls back to the
+/// shell window — it always exists on a real desktop, and the goal is only
+/// that the foreground ends up anywhere but this process.
 pub(crate) unsafe fn release_foreground() {
     let ours = unsafe { GetCurrentProcessId() };
     let mut current = unsafe { GetForegroundWindow() };
-    if current.is_invalid() || owner_of(current) != ours {
+    if !current.is_invalid() && owner_of(current) != ours {
         // Another process owns the foreground: nothing to hand over.
         return;
     }
@@ -323,11 +328,11 @@ pub(crate) unsafe fn release_foreground() {
     // of the loop condition.
     for _ in 0..64 {
         let Ok(next) = (unsafe { GetWindow(current, GW_HWNDNEXT) }) else {
-            return;
+            break;
         };
         current = next;
         if current.is_invalid() {
-            return;
+            break;
         }
         if !unsafe { IsWindowVisible(current).as_bool() } || unsafe { IsIconic(current).as_bool() }
         {
@@ -337,6 +342,10 @@ pub(crate) unsafe fn release_foreground() {
             let _ = unsafe { SetForegroundWindow(current) };
             return;
         }
+    }
+    let shell = unsafe { GetShellWindow() };
+    if !shell.is_invalid() && owner_of(shell) != ours {
+        let _ = unsafe { SetForegroundWindow(shell) };
     }
 }
 
