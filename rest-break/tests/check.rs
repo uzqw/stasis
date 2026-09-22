@@ -612,6 +612,32 @@ fn missing_and_corrupt_history() {
     assert!(read_history(&path).is_err());
 }
 #[test]
+fn observed_lock_overrides_afk_watcher_conflict() {
+    // 系统锁定期间 aw-watcher-afk 仍上报贯穿锁定的 not-afk 长事件，与锁定
+    // 后的 afk 事件重叠数十分钟。overlay 前移后锁定区间先被覆盖成 afk，
+    // 不再误报 conflicting_overlap。
+    let sessions = json!([{"id":"s1", "phase":"ended", "segments":[{
+        "lockedAt": iso(now()-Duration::minutes(40)),
+        "lockedThrough": iso(now()-Duration::minutes(30)),
+        "unlockedAt": iso(now()-Duration::minutes(30)),
+        "endReason": "scheduled"
+    }]}]);
+    let events = [e(-70.0, 0.0), afk(-40.0, -30.0)];
+    let (d, f) = evaluate_observed(&events, Some(&sessions), &Value::Null, now()).unwrap();
+    assert!(!d.reason.contains("conflicting_overlap"), "{d:?}");
+    close(d.work_minutes, 60.0);
+    // 30 分钟工作 − 10 分钟锁定 × 6（被 max(0) 截断）+ 30 分钟工作 = 30。
+    close(f / 60.0, 30.0);
+}
+#[test]
+fn conflicting_overlap_reports_real_fatigue() {
+    // skip 路径不清零疲劳：残留工作段仍是真实疲劳，UI 不能显示"疲劳 0"。
+    let (d, f) = evaluate(&[e(-100.0, 0.0), afk(-20.0, -10.0)], &json!([]), now()).unwrap();
+    assert_eq!(d.reason, "conflicting_overlap");
+    close(d.work_minutes, 100.0);
+    close(f / 60.0, 100.0);
+}
+#[test]
 fn long_event_starting_before_window_counts() {
     result(&[e(-360.0, 0.0)], "fatigue_threshold", 180.0, 15);
 }

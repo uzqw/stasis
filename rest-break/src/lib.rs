@@ -288,7 +288,20 @@ pub fn evaluate_with_freshness(
             (r, u)
         }
     };
-    let skip = |reason| Ok((decision(now, reason, 0.0, 0), 0.0));
+    // 跳过路径也如实计算疲劳：锁定期间 aw-watcher-afk 残留的 not-afk 工作段
+    // 仍是真实疲劳，清零会让 UI 显示"疲劳 0"误导用户。
+    let skip = |intervals: &[Interval], rests: &[Interval], reason: &str| {
+        let (mut work, mut fatigue) = (0.0, 0.0);
+        for iv in intervals {
+            if iv.status == "afk" {
+                fatigue = (fatigue - recovery_fatigue(*iv, rests)).max(0.0);
+            } else {
+                work += seconds(iv.end - iv.start);
+                fatigue += fatigue_seconds(iv.start, iv.end);
+            }
+        }
+        Ok((decision(now, reason, work, 0), fatigue))
+    };
     let window_start = now - Duration::hours(3);
     let mut parsed = Vec::new();
     let (mut last_start, mut last_zero) = (Time::MIN_UTC, false);
@@ -318,7 +331,7 @@ pub fn evaluate_with_freshness(
             .iter()
             .any(|p| !p.3 && seconds(p.0 - last_start).abs() < 1.0)
     {
-        return skip("zero_duration_event_no_coverage");
+        return skip(&[], &rests, "zero_duration_event_no_coverage");
     }
     let mut intervals = Vec::new();
     for (start, end, status, zero) in parsed {
@@ -332,16 +345,22 @@ pub fn evaluate_with_freshness(
         let status = match status {
             "afk" => "afk",
             "not-afk" => "not-afk",
-            _ => return skip("unknown_status"),
+            _ => return skip(&intervals, &rests, "unknown_status"),
         };
         intervals.push(Interval { start, end, status });
     }
     if intervals.is_empty() {
-        return skip("no_data");
+        return skip(&intervals, &rests, "no_data");
     }
     intervals.sort_by_key(|i| (i.start, i.end, i.status));
     if now - intervals.iter().map(|i| i.end).max().unwrap() > freshness {
-        return skip("stale_latest_event_end");
+        return skip(&intervals, &rests, "stale_latest_event_end");
+    }
+    // 观测到的锁定会话优先于 AW 状态：aw-watcher-afk 在系统锁定期间仍会
+    // 上报贯穿锁定的 not-afk 长事件，与锁定后的 afk 事件重叠数十分钟。
+    // 先把锁定区间覆盖成 afk 再判冲突，否则恒定误报 conflicting_overlap。
+    if sessions.is_some() {
+        intervals = overlay(&intervals, &rests);
     }
     let mut merged: Vec<Interval> = Vec::new();
     for iv in intervals {
@@ -350,7 +369,7 @@ pub fn evaluate_with_freshness(
         {
             if iv.status != prev.status {
                 if prev.end - iv.start > Duration::seconds(5) {
-                    return skip("conflicting_overlap");
+                    return skip(&merged, &rests, "conflicting_overlap");
                 }
                 prev.end = iv.start;
             } else {
@@ -371,9 +390,7 @@ pub fn evaluate_with_freshness(
         }
         filled.push(*iv);
     }
-    if sessions.is_some() {
-        filled = overlay(&filled, &rests);
-    } else {
+    if sessions.is_none() {
         account_delay(&mut filled, &rests);
     }
     let (mut work, mut fatigue, mut covered, mut baseline) = (0.0, 0.0, 0.0, false);
