@@ -183,6 +183,7 @@ struct App {
     positioned: bool,
     above_sent: bool,
     last_size: egui::Vec2,
+    last_expanded: bool,
 }
 
 impl App {
@@ -193,6 +194,7 @@ impl App {
             positioned: false,
             above_sent: false,
             last_size: egui::vec2(0.0, 0.0),
+            last_expanded: false,
             config,
         }
     }
@@ -268,19 +270,21 @@ impl eframe::App for App {
         }
 
         // 展开态切换时同步窗口高度；只在变化时发命令，避免每帧重绘循环。
-        // 向上展开：钉住窗口底边，只改高度，顶部随之上升，适合放在屏幕右下角。
+        // 向上展开：钉住窗口底边，只改高度，顶部随之上升，适合贴在屏幕底边的角落。
+        // OuterPosition 定的是外框（含边框/阴影），InnerSize 定的是内框，
+        // 两者换算用「外框高 - 旧内框高」得到的边框差补偿。
         let old_size = self.last_size;
         let size = self.window_size();
         if size != self.last_size {
             self.last_size = size;
-            if old_size.y > 0.0 {
-                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-                    let new_pos = egui::pos2(
-                        rect.min.x,
-                        rect.max.y - size.y - (rect.max.y - rect.min.y - old_size.y),
-                    );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
-                }
+            if old_size.y > 0.0
+                && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
+            {
+                let new_pos = egui::pos2(
+                    rect.min.x,
+                    rect.max.y - size.y - (rect.max.y - rect.min.y - old_size.y),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
@@ -291,8 +295,13 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(ms));
         }
 
-        // 绝对坐标时不要用 monitor_size 当 (0,0) 原点去夹——双屏会把窗口拽回左半边。
+        // 越界回弹：窗口右下角被拖出屏幕时拉回。只在 expanded 态变化后跑一帧——
+        // 每帧都跑会和「向上展开」的 OuterPosition 打架（展开后旧外框瞬间越界，
+        // 回弹又把底边拽回屏内，展开方向被顶成向下，标题行被顶出可视区）。
+        // 手动拖出屏幕的纠正靠 OS/用户，这里只兜住展开那一刻的越界。
+        let expanded_now = self.hover.expanded();
         if self.config.pos.is_none()
+            && expanded_now != self.last_expanded
             && let Some(screen) = ctx.input(|i| i.viewport().monitor_size)
             && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
         {
@@ -309,6 +318,7 @@ impl eframe::App for App {
                 ctx.request_repaint();
             }
         }
+        self.last_expanded = expanded_now;
     }
 
     /// 全透明底：紫边圆角框在内容外渲染，透明区域不遮挡桌面。
@@ -322,6 +332,8 @@ impl eframe::App for App {
         // 交互判定必须用视口局部坐标：`hover_pos` 是视口局部坐标，而
         // `viewport().inner_rect` 是屏幕坐标（Wayland 上恒为 None），
         // 两者混用会把「指针在窗内」永远判成假（leg 1 悬停失效的根因）。
+        // hover_pos 与 viewport_rect 同为视口局部坐标，指针离开窗口后
+        // winit 发 PointerGone 使 hover_pos 变 None，hovered 判假收起。
         let hovered = ctx.input(|i| {
             i.pointer
                 .hover_pos()
