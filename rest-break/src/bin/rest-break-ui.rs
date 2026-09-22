@@ -19,10 +19,16 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 const CJK_FONTS: &[(&str, u32)] = &[
     ("/usr/share/fonts/droid/DroidSansFallbackFull.ttf", 0),
-    ("/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf", 0),
+    (
+        "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf",
+        0,
+    ),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
-    ("/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc", 0),
+    (
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+        0,
+    ),
     ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
     ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
 ];
@@ -200,9 +206,15 @@ impl App {
     }
 
     fn summary(&self) -> String {
-        match &self.status {
+        let base = match &self.status {
             Ok(s) => rest_break::ui::summary_line(s),
             Err(_) => "休息状态数据不可用".to_string(),
+        };
+        // 钉住时给个视觉提示，否则用户不知道要再点一下才收。
+        if self.hover.pinned() {
+            format!("📌 {base}")
+        } else {
+            base
         }
     }
 
