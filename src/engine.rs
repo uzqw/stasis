@@ -290,7 +290,16 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                     });
                 }
 
+                let tick_started = Instant::now();
                 let msgs = controller.tick(&mut backend, now);
+                // events() re-reads the whole event directory; when AV or a
+                // wedged filesystem stretches a tick past the 1s cadence the
+                // schedule slips silently.  Leave a line so a stalled tick is
+                // visible in the log instead of only in missing heartbeats.
+                let elapsed = tick_started.elapsed();
+                if elapsed > Duration::from_secs(2) {
+                    tracing::warn!("controller tick took {:.1}s", elapsed.as_secs_f64());
+                }
                 for (msg, ok) in msgs {
                     update(&snapshot, |s| {
                         s.locked = backend.is_locked();
