@@ -148,6 +148,15 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     let tick_rx = crossbeam_channel::tick(Duration::from_secs(1));
     let mut last_poll = Instant::now();
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    /// Windows can keep a low-level hook installed yet stop calling it (the
+    /// hooking process holds — or just released to an empty desktop — the
+    /// foreground).  When unlock mode arms and no backend event arrives
+    /// within this window, capture is presumed starved and the grab is
+    /// rebuilt once; other platforms have no such starvation mode.
+    #[cfg(target_os = "windows")]
+    const ARMED_SILENCE: Duration = Duration::from_secs(3);
+    #[cfg(target_os = "windows")]
+    let mut armed_at: Option<Instant> = None;
 
     loop {
         // Determine which channels to select on this iteration.
@@ -213,30 +222,7 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         tracing::warn!(
                             "input reached the window while locked; re-arming input capture"
                         );
-                        keypad.clear_password();
-                        match backend.restart_grab() {
-                            Ok(()) => {
-                                tracing::info!("input capture re-armed");
-                                update(&snapshot, |s| {
-                                    s.password_len = 0;
-                                    s.message = "输入已重新捕获 — 请重新输入密码".into();
-                                    s.ok = true;
-                                });
-                            }
-                            Err(e) => {
-                                // Without capture there is no lock to claim.
-                                tracing::warn!("re-arming input capture failed: {e}");
-                                let _ = backend.stop_lock();
-                                keypad.device_lost();
-                                update(&snapshot, |s| {
-                                    s.locked = false;
-                                    s.unlock_mode = false;
-                                    s.password_len = 0;
-                                    s.message = format!("重新捕获输入失败，已解除锁定: {e}");
-                                    s.ok = false;
-                                });
-                            }
-                        }
+                        rearm_capture(&mut keypad, &mut backend, &snapshot);
                     }
                 }
                 Ok(UiCmd::ChangePassword { old, new }) => {
@@ -288,6 +274,26 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         s.message = "输入后端异常退出".into();
                         s.ok = false;
                     });
+                }
+
+                // Armed-silence watchdog: a starved hook stays installed, so
+                // the only observable symptom is that no backend event arrives
+                // after the gesture armed unlock mode.  Re-arming once makes
+                // the fresh hook re-run the foreground handoff; if keys were
+                // already flowing, `armed_at` was cleared on the first one.
+                #[cfg(target_os = "windows")]
+                if let Some(at) = armed_at
+                    && at.elapsed() >= ARMED_SILENCE
+                {
+                    armed_at = None;
+                    if backend.is_locked() && keypad.is_unlock_mode() {
+                        tracing::warn!(
+                            "no input within {}s of arming unlock mode; \
+                             re-arming input capture",
+                            ARMED_SILENCE.as_secs()
+                        );
+                        rearm_capture(&mut keypad, &mut backend, &snapshot);
+                    }
                 }
 
                 let tick_started = Instant::now();
@@ -382,7 +388,14 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                 let rx = backend_rx.as_ref().unwrap();
                 match oper.recv(rx) {
                     Ok(BackendEvent::Key(key)) => {
-                        let action = keypad.feed(Instant::now(), key);
+                        let now = Instant::now();
+                        let action = keypad.feed(now, key);
+                        #[cfg(target_os = "windows")]
+                        match action {
+                            Action::UnlockMode => armed_at = Some(now),
+                            Action::Password { .. } | Action::Submit => armed_at = None,
+                            Action::None => {}
+                        }
                         handle_keypad_action(
                             action,
                             &mut keypad,
@@ -474,6 +487,41 @@ fn handle_keypad_action(
             }
         }
         Action::None => {}
+    }
+}
+
+/// Re-arm capture after input was observed leaking past the hook (or none
+/// arrived at all).  The partially typed password is untrustworthy — it may
+/// be missing characters — so it is dropped and the grab rebuilt.  A failed
+/// re-arm releases the lock rather than claiming one without capture.
+fn rearm_capture(
+    keypad: &mut Keypad,
+    backend: &mut BackendHandle,
+    snapshot: &Arc<Mutex<Snapshot>>,
+) {
+    keypad.clear_password();
+    match backend.restart_grab() {
+        Ok(()) => {
+            tracing::info!("input capture re-armed");
+            update(snapshot, |s| {
+                s.password_len = 0;
+                s.message = "输入已重新捕获 — 请重新输入密码".into();
+                s.ok = true;
+            });
+        }
+        Err(e) => {
+            // Without capture there is no lock to claim.
+            tracing::warn!("re-arming input capture failed: {e}");
+            let _ = backend.stop_lock();
+            keypad.device_lost();
+            update(snapshot, |s| {
+                s.locked = false;
+                s.unlock_mode = false;
+                s.password_len = 0;
+                s.message = format!("重新捕获输入失败，已解除锁定: {e}");
+                s.ok = false;
+            });
+        }
     }
 }
 
