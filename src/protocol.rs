@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -70,13 +73,24 @@ pub struct EventStore {
     /// Files dropped by the last capped read, so the warning fires on change
     /// instead of once per tick (it is read ~1/s while locked).
     truncated_at: AtomicUsize,
+    /// Parsed events keyed by path, invalidated on mtime or size change.
+    /// `events()` runs once per engine tick over directories that can hold
+    /// 1000+ files; without this cache every tick re-opens and re-parses all
+    /// of them, which AV scanning can stretch into seconds on Windows.
+    /// Entries for deleted files linger (a few KB); filenames are random
+    /// UUIDs, so a stale entry can never alias a new event.
+    cache: Mutex<HashMap<PathBuf, CacheEntry>>,
 }
+
+/// Cached parse result for one event file.
+type CacheEntry = (SystemTime, u64, Option<Event>);
 
 impl EventStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
             truncated_at: AtomicUsize::new(0),
+            cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -114,12 +128,12 @@ impl EventStore {
         let Ok(entries) = fs::read_dir(dir) else {
             return out;
         };
-        let mut paths: Vec<(std::time::SystemTime, PathBuf)> = entries
+        let mut paths: Vec<(SystemTime, u64, PathBuf)> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .filter_map(|e| {
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                Some((mtime, e.path()))
+                let meta = e.metadata().ok()?;
+                Some((meta.modified().ok()?, meta.len(), e.path()))
             })
             .collect();
         paths.sort();
@@ -139,10 +153,18 @@ impl EventStore {
             paths.drain(..dropped);
         }
 
-        for (_, path) in paths {
-            match Self::read_one(&path) {
-                Ok(ev) if ev.is_valid() => out.push(ev),
-                _ => {}
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        for (mtime, len, path) in paths {
+            let ev = match cache.get(&path) {
+                Some((t, l, cached)) if *t == mtime && *l == len => cached.clone(),
+                _ => {
+                    let parsed = Self::read_one(&path).ok().filter(|e| e.is_valid());
+                    cache.insert(path.clone(), (mtime, len, parsed.clone()));
+                    parsed
+                }
+            };
+            if let Some(ev) = ev {
+                out.push(ev);
             }
         }
         out
@@ -418,6 +440,35 @@ mod tests {
         let evs = store.events();
         assert_eq!(evs.len(), MAX_READ_BATCH);
         assert!(evs.iter().any(|e| e.kind == LOCKED));
+    }
+
+    #[test]
+    fn changed_event_file_is_reloaded() {
+        // events() caches parsed files by (mtime, len); a rewritten file must
+        // be re-read instead of serving the stale event.
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.results_dir()).unwrap();
+        let path = store.results_dir().join("ev.json");
+        let mk = |kind: &str, pad: &str| {
+            format!(
+                concat!(
+                    r#"{{"schema":"input-locker.event/v1","eventId":"e1","#,
+                    r#""sessionId":"s1","type":"{}","#,
+                    r#""recordedAt":"2026-09-08T03:00:00Z","#,
+                    r#""data":{{"pad":"{}"}}}}"#
+                ),
+                kind, pad
+            )
+        };
+        fs::write(&path, mk(LOCKED, "")).unwrap();
+        assert_eq!(store.events()[0].kind, LOCKED);
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        fs::write(&path, mk(OBSERVED, "longer")).unwrap();
+        let evs = store.events();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, OBSERVED);
     }
 
     #[test]
