@@ -554,6 +554,25 @@ mod tests {
             .unwrap();
     }
 
+    /// Force every later `emit_result` to fail on every platform: a regular
+    /// file where the results directory belongs.  `events()` reads requests
+    /// and results alike, so events already written move to `requests` and the
+    /// session state survives.  Marking a directory read-only does not stop
+    /// file creation on Windows, which made these three tests fail there.
+    fn break_results(store: &EventStore) {
+        let results = store.results_dir();
+        fs::create_dir_all(store.requests_dir()).unwrap();
+        if results.is_dir() {
+            for entry in fs::read_dir(&results).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_owned();
+                fs::rename(&path, store.requests_dir().join(name)).unwrap();
+            }
+            fs::remove_dir(&results).unwrap();
+        }
+        fs::write(&results, b"").unwrap();
+    }
+
     #[test]
     fn full_rest_locks_and_unlocks() {
         let tmp = TempDir::new().unwrap();
@@ -687,12 +706,6 @@ mod tests {
     fn event_write_failure_rolls_back_lock() {
         let tmp = TempDir::new().unwrap();
         let store = EventStore::new(tmp.path());
-        // Make results dir read-only so emit_result fails
-        fs::create_dir_all(store.results_dir()).unwrap();
-        let mut perms = fs::metadata(store.results_dir()).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(store.results_dir(), perms.clone()).unwrap();
-
         let mut locker = FakeLocker {
             locked: false,
             fail_start: false,
@@ -700,19 +713,9 @@ mod tests {
         };
         let mut ctrl = Controller::new(store);
         request(&ctrl.store, "s1", 0, 10);
+        break_results(&ctrl.store);
 
         let msgs = ctrl.tick(&mut locker, base());
-
-        // Restore permissions for cleanup
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(ctrl.store.results_dir())
-                .unwrap()
-                .permissions();
-            perms.set_mode(0o755);
-            let _ = fs::set_permissions(ctrl.store.results_dir(), perms);
-        }
 
         assert!(msgs.iter().any(|(m, _)| m == "计划休息锁定失败"));
         assert!(!locker.is_locked());
@@ -786,13 +789,8 @@ mod tests {
         ctrl.tick(&mut locker, base());
         assert!(locker.is_locked());
 
-        // Make results dir read-only so emit_result fails during unlock
-        fs::create_dir_all(ctrl.store.results_dir()).unwrap();
-        let mut perms = fs::metadata(ctrl.store.results_dir())
-            .unwrap()
-            .permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(ctrl.store.results_dir(), perms.clone()).unwrap();
+        // The unlock event cannot be written: the lock must still be released.
+        break_results(&ctrl.store);
 
         let (ok, _msg) = ctrl.unlock(&mut locker, "password", base() + Duration::seconds(1));
         assert!(!ok);
@@ -800,16 +798,6 @@ mod tests {
             !locker.is_locked(),
             "stop_lock must be called even when emit_result fails"
         );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(ctrl.store.results_dir())
-                .unwrap()
-                .permissions();
-            perms.set_mode(0o755);
-            let _ = fs::set_permissions(ctrl.store.results_dir(), perms);
-        }
     }
 
     #[test]
@@ -826,13 +814,9 @@ mod tests {
         ctrl.tick(&mut locker, base());
         assert!(locker.is_locked());
 
-        // Make results dir read-only so emit_result fails during scheduled unlock
-        fs::create_dir_all(ctrl.store.results_dir()).unwrap();
-        let mut perms = fs::metadata(ctrl.store.results_dir())
-            .unwrap()
-            .permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(ctrl.store.results_dir(), perms.clone()).unwrap();
+        // The scheduled unlock event cannot be written: the lock must still be
+        // released.
+        break_results(&ctrl.store);
 
         let msgs = ctrl.tick(&mut locker, base() + Duration::minutes(10));
         assert!(msgs.iter().any(|(m, _)| m == "计划休息解锁失败，正在重试"));
@@ -840,16 +824,6 @@ mod tests {
             !locker.is_locked(),
             "stop_lock must be called even when emit_result fails"
         );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(ctrl.store.results_dir())
-                .unwrap()
-                .permissions();
-            perms.set_mode(0o755);
-            let _ = fs::set_permissions(ctrl.store.results_dir(), perms);
-        }
     }
 
     #[test]

@@ -69,7 +69,9 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
   先最小化再锁定的命令路径、自动休息路径均以真键盘 `j`×3 → 密码 → 回车解锁，
   自动休息写入 `rest.unlocked`（`password`）。受测 Windows 构建 sha256
   `3e79189d…2e4918`。此前单次密码错误的具体字符成因无法从日志还原，
-  不将其等同于钩子丢键。证据见
+  不将其等同于钩子丢键。同一轮真机复验中，`cargo test --release` 的
+  `x86_64-pc-windows-gnu` 产物在真机跑出 **49 项全通过**（debug 测试产物因孤儿
+  IAT 槽启动崩溃，属工具链侧问题）。证据见
   [2026-09-23 排查与复验](docs/notes/windows-unlock-incident-2026-09-23.md)。
 
 完整测试记录与截图见
@@ -84,6 +86,9 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
 - **已知交互缺口（真机实测）**：锁定中「强制解锁（UI）」不可达——鼠标点击被鼠标钩子吞掉，
   键盘修复后又被正常捕获（`Tab` 被当未映射键吞掉、`Enter` 变成提交密码），所以锁定期间的
   应用内通路就是密码；进程外恢复靠 command 文件或终止进程。详见真机记录「Findings」。
+- **诊断盲区**：计划到点自动释放只在事件库留下 `rest.unlocked reason=scheduled`，
+  日志侧无任何行；command 文件锁定也不写协议事件、只回 ack。排查时须查事件库，
+  不能因日志无行而判断未锁定或未解锁。
 - Linux 端尚未覆盖的回归用例（热插拔、半数设备抓取失败、时钟跳变等）见
   [implementation-plan.md](docs/implementation-plan.md) 的回归用例表。
 - 安装包、自启动、签名/权限引导等交付项（阶段 4）未完成；当前仅有 `cargo build --release`
