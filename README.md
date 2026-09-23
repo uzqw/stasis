@@ -108,6 +108,11 @@ cargo build --release
 排查输入/锁定问题时先看应用自己的日志：`~/.config/stasis/stasis.log.YYYY-MM-DD`（按 UTC 日期滚动，
 **不写 journald**）；需要更详细的等级时给进程设 `RUST_LOG=info`。
 
+开发机（Manjaro）不用打包安装，而是两个 systemd user 服务直接跑仓库产物：
+`stasis.service` → `target/release/stasis`，`rest-break-ui.service` →
+`rest-break/target/release/rest-break-ui`（均挂 `graphical-session.target`）。
+部署 = 从目标 commit 重新构建这两个 crate **并**重启两个服务；只构建不重启不算部署。
+
 新项目独立开发，原 `../input-locker` 保留使用。切换前不得让两个程序同时消费同一事件目录或抓取输
 入。
 

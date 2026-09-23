@@ -74,6 +74,37 @@ Windows 原生单测（2026-09-23 复验，release 构建）：
 **未验证**：UAC 安全桌面与提权进程的输入边界；钩子被系统静默移除的真实触发；
 本轮手势与密码均为注入键，未用物理键盘复验；debug 产物孤儿 IAT 槽的成因。
 
+## 本机（Manjaro）部署与本地复验
+
+本机不是打包安装，而是两个 systemd user 服务直接跑仓库里的 release 产物：
+`stasis.service` → `target/release/stasis`，`rest-break-ui.service` →
+`rest-break/target/release/rest-break-ui`。因此「部署」= 从当前 main 重新构建 + 重启这两个服务；
+只构建不重启，或在别处安装，都不算部署。
+
+部署前本机跑的是 2026-09-21 的构建（`stasis` sha256 `980b0ee8…`），比 `2faf18d`（事件缓存）、
+`0fd7876`（rest-break-ui 修复）和本次窗口修复都旧。
+本机同样出过该症状：`2026-09-23T12:23:31`–`12:24:05` 本地日志连续 5 次
+`unlock rejected: wrong password`，第 6 次才 `unlocked (password)`；期间事件目录心跳告警正常，
+没有 re-arm 记录。与 Windows 那次一样，日志无法还原密码为何不匹配。
+
+复验（`2026-09-23T14:25`，命令文件通道先行确认可用，全程约 6 秒）：
+
+```text
+锁定前 : WM_STATE window state: Iconic   _NET_WM_STATE_HIDDEN
+lock   : ok
+锁定后 : WM_STATE window state: Normal   _NET_WM_STATE_FOCUSED, ABOVE, STAYS_ON_TOP
+         log: showing lock window minimized=Some(true) focused=Some(false)
+unlock : ok   log: unlocked (command)   state: locked=false
+```
+
+受测本机构建 sha256 `1b371ae94df6a8b58db6247e3e512352102645337102aeca6881d973048533b5`。
+本机恢复通道：往 `events_dir` 的父目录写 `input-locker-command.json`（**必须带 `id`**），
+路径 `/home/uzqw/wp/github/input-locker`；命令文件解锁即使当前未锁定也回 `ok`，
+可用于开局验证通道。
+
+本机 `events_dir` 仍指向旧 Python input-locker 的数据目录，而旧 `input-locker.service` 已 disabled，
+所以眼下没有两个消费者共用同一目录；若要改回独立目录，需与 aide 侧写入方同步。
+
 ## 尚未证明
 
 无法仅凭最小化窗口推断事故中密码错误的具体成因；若修复后再次出现密码错误，
