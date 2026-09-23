@@ -64,6 +64,13 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
   都得到 `unlocked (password)`、无泄漏告警；受测构建 sha256 `7aa064b0…44613a`。
 - 锁定约 25 分钟内日志无 `Health` 与回调耗时告警，但**这个信号不足以判断捕获是否有效**：
   「窗口占前台」那次失效期间同样没有任何 `Health`（回调根本没被调用）。
+- **2026-09-23 最小化窗口修复（真机复验）**：自动锁定前窗口已最小化时，旧版仅置顶，
+  用户看不到解锁模式与密码圆点。新版锁定时恢复可见、取消最小化，仍不抢前台；
+  先最小化再锁定的命令路径、自动休息路径均以真键盘 `j`×3 → 密码 → 回车解锁，
+  自动休息写入 `rest.unlocked`（`password`）。受测 Windows 构建 sha256
+  `3e79189d…2e4918`。此前单次密码错误的具体字符成因无法从日志还原，
+  不将其等同于钩子丢键。证据见
+  [2026-09-23 排查与复验](docs/notes/windows-unlock-incident-2026-09-23.md)。
 
 完整测试记录与截图见
 [docs/notes/stasis-windows-realtest-leg1.md](docs/notes/stasis-windows-realtest-leg1.md)。

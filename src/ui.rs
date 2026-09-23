@@ -139,6 +139,17 @@ impl eframe::App for App {
         if snap.locked != self.on_top {
             self.on_top = snap.locked;
             let level = if snap.locked {
+                // A scheduled lock can start while the GUI is minimized or
+                // hidden.  Topmost alone does not restore either state; show
+                // feedback without stealing focus from the keyboard hook.
+                let viewport = ctx.input(|i| i.viewport().clone());
+                tracing::info!(
+                    minimized = ?viewport.minimized,
+                    focused = ?viewport.focused,
+                    "showing lock window"
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 egui::WindowLevel::AlwaysOnTop
             } else {
                 egui::WindowLevel::Normal
