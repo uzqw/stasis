@@ -393,7 +393,13 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                         #[cfg(target_os = "windows")]
                         match action {
                             Action::UnlockMode => armed_at = Some(now),
-                            Action::Password { .. } | Action::Submit => armed_at = None,
+                            Action::Password { .. } | Action::Submit => {
+                                if armed_at.take().is_some() {
+                                    // Record only that input arrived, never the
+                                    // character or password length.
+                                    tracing::info!("unlock input reached engine after gesture");
+                                }
+                            }
                             Action::None => {}
                         }
                         handle_keypad_action(
