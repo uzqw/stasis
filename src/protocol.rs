@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -223,6 +223,71 @@ impl EventStore {
         )
     }
 
+    /// Directory budgets.  [`MAX_READ_BATCH`] caps one read, so the on-disk
+    /// count is pruned back below it; a directory that only ever grew would
+    /// eventually have the read cap drop a live `rest.locked` and leave the
+    /// machine locked past its schedule.
+    const PRUNE_TRIGGER: usize = MAX_READ_BATCH;
+    const PRUNE_TARGET: usize = 300;
+
+    /// Once `dir` passes [`Self::PRUNE_TRIGGER`], delete its oldest event files
+    /// down to [`Self::PRUNE_TARGET`].
+    ///
+    /// A file whose session is in `keep` is never touched: the projection
+    /// replays the directories, so dropping a live `rest.locked` (or the
+    /// `rest.requested` behind it) would make the engine forget a lock it owns.
+    /// Oldest-first also keeps the recent finished sessions that rest-break
+    /// reads through aide for its fatigue and cooldown windows.
+    pub fn prune(&self, dir: &Path, keep: &HashSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<(SystemTime, PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            // A writer's in-flight temp file is not a finished event.
+            .filter(|e| !e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        if paths.len() <= Self::PRUNE_TRIGGER {
+            return;
+        }
+        paths.sort();
+        let mut excess = paths.len() - Self::PRUNE_TARGET;
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut removed = 0;
+        for (_mtime, path) in paths {
+            if excess == 0 {
+                break;
+            }
+            let session = match cache.get(&path) {
+                Some((_, _, Some(ev))) => Some(ev.session_id.clone()),
+                // Cached as unparseable: clean it up rather than keep it.
+                Some(_) => None,
+                None => Self::read_one(&path)
+                    .ok()
+                    .filter(|e| e.is_valid())
+                    .map(|e| e.session_id),
+            };
+            if session.as_deref().is_some_and(|s| keep.contains(s)) {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                cache.remove(&path);
+                removed += 1;
+                excess -= 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                "pruned {} finished events from {} to stay under {} files",
+                removed,
+                dir.display(),
+                Self::PRUNE_TARGET
+            );
+        }
+    }
+
     fn fsync_parent(path: &Path) -> io::Result<()> {
         let parent = path.parent().unwrap_or(Path::new("."));
         let file = fs::File::open(parent)?;
@@ -440,6 +505,41 @@ mod tests {
         let evs = store.events();
         assert_eq!(evs.len(), MAX_READ_BATCH);
         assert!(evs.iter().any(|e| e.kind == LOCKED));
+    }
+
+    #[test]
+    fn prune_drops_oldest_but_keeps_live_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.results_dir()).unwrap();
+        let mk = |sid: &str| {
+            format!(
+                concat!(
+                    r#"{{"schema":"input-locker.event/v1","eventId":"{}","#,
+                    r#""sessionId":"{}","type":"rest.observed","#,
+                    r#""recordedAt":"2026-09-08T03:00:00Z","data":{{}}}}"#
+                ),
+                Uuid::new_v4(),
+                sid
+            )
+        };
+        // File 0 is the oldest and belongs to the session still holding the lock.
+        for i in 0..MAX_READ_BATCH + 20 {
+            let sid = if i == 0 { "live" } else { "done" };
+            fs::write(store.results_dir().join(format!("{i:040}.json")), mk(sid)).unwrap();
+        }
+        let keep: HashSet<String> = ["live".to_string()].into_iter().collect();
+        store.prune(&store.results_dir(), &keep);
+
+        let names: Vec<String> = fs::read_dir(store.results_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 300);
+        assert!(
+            names.contains(&format!("{:040}.json", 0)),
+            "the live session's oldest file must survive the prune"
+        );
     }
 
     #[test]

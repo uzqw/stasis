@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -229,11 +229,16 @@ pub trait LockOps {
 /// Rest-session controller.  Owns the event store and schedule.
 pub struct Controller {
     store: EventStore,
+    /// Last directory prune, so the listing does not run on every tick.
+    pruned_at: Option<DateTime<Utc>>,
 }
 
 impl Controller {
     pub fn new(store: EventStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            pruned_at: None,
+        }
     }
 
     pub fn sessions(&self, now: DateTime<Utc>) -> HashMap<String, Session> {
@@ -244,6 +249,26 @@ impl Controller {
     pub fn tick(&mut self, locker: &mut impl LockOps, now: DateTime<Utc>) -> Vec<(String, bool)> {
         let mut out = Vec::new();
         let sessions = self.sessions(now);
+
+        // Every rest emits a `rest.observed` heartbeat every 30 s, so without a
+        // cap the results directory grows until the read cap starts dropping
+        // live events.  Prune on the heartbeat cadence: sessions whose window
+        // has closed and that no longer drive the lock may go, the rest stay.
+        if self
+            .pruned_at
+            .is_none_or(|t| now.signed_duration_since(t) >= Duration::seconds(30))
+        {
+            self.pruned_at = Some(now);
+            let keep: HashSet<String> = sessions
+                .iter()
+                .filter(|(_, s)| {
+                    now < s.unlock_at || matches!(s.phase, Phase::Active | Phase::Waiting)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            self.store.prune(&self.store.results_dir(), &keep);
+            self.store.prune(&self.store.requests_dir(), &keep);
+        }
         let mut active: Vec<_> = sessions
             .values()
             .filter(|s| s.phase == Phase::Active)
