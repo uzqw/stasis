@@ -223,21 +223,29 @@ impl EventStore {
         )
     }
 
-    /// Directory budgets.  [`MAX_READ_BATCH`] caps one read, so the on-disk
-    /// count is pruned back below it; a directory that only ever grew would
-    /// eventually have the read cap drop a live `rest.locked` and leave the
-    /// machine locked past its schedule.
+    /// Directory budgets for the non-compactable files.  [`MAX_READ_BATCH`]
+    /// caps one read, so the on-disk count is budgeted back below it; a
+    /// directory that only ever grew would eventually have the read cap drop a
+    /// live `rest.locked` and leave the machine locked past its schedule.
     const PRUNE_TRIGGER: usize = MAX_READ_BATCH;
     const PRUNE_TARGET: usize = 300;
 
-    /// Once `dir` passes [`Self::PRUNE_TRIGGER`], delete its oldest event files
-    /// down to [`Self::PRUNE_TARGET`].
+    /// Bound `dir`, in two stages:
     ///
-    /// A file whose session is in `keep` is never touched: the projection
-    /// replays the directories, so dropping a live `rest.locked` (or the
-    /// `rest.requested` behind it) would make the engine forget a lock it owns.
-    /// Oldest-first also keeps the recent finished sessions that rest-break
-    /// reads through aide for its fatigue and cooldown windows.
+    /// 1. **Compact** the periodic `rest.observed` heartbeat: a session keeps
+    ///    only its newest one.  The projection only ever extends
+    ///    `lockedThrough` from the latest heartbeat, so older files are no-ops
+    ///    — the same "keep the latest value per key" contract as a Kafka
+    ///    compacted topic.  This is what stops one long rest from flooding the
+    ///    directory (and the read cap from ever seeing it).
+    /// 2. **Budget** what is left: past [`Self::PRUNE_TRIGGER`], drop the
+    ///    oldest files down to [`Self::PRUNE_TARGET`].
+    ///
+    /// A file whose session is in `keep` is never budgeted away: the
+    /// projection replays the directories, so dropping a live `rest.locked`
+    /// (or the `rest.requested` behind it) would make the engine forget a lock
+    /// it owns.  Oldest-first also keeps the recent finished sessions that
+    /// rest-break reads through aide for its fatigue and cooldown windows.
     pub fn prune(&self, dir: &Path, keep: &HashSet<String>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
@@ -249,41 +257,69 @@ impl EventStore {
             .filter(|e| !e.file_name().to_string_lossy().starts_with(".tmp-"))
             .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
             .collect();
-        if paths.len() <= Self::PRUNE_TRIGGER {
-            return;
-        }
         paths.sort();
-        let mut excess = paths.len() - Self::PRUNE_TARGET;
+
+        struct Candidate {
+            path: PathBuf,
+            session: Option<String>,
+            observed: bool,
+        }
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
-        let mut removed = 0;
-        for (_mtime, path) in paths {
-            if excess == 0 {
-                break;
+        let candidates: Vec<Candidate> = paths
+            .into_iter()
+            .map(|(_mtime, path)| {
+                let event = match cache.get(&path) {
+                    Some((_, _, cached)) => cached.clone(),
+                    None => Self::read_one(&path).ok().filter(|e| e.is_valid()),
+                };
+                Candidate {
+                    session: event.as_ref().map(|e| e.session_id.clone()),
+                    observed: event.as_ref().is_some_and(|e| e.kind == OBSERVED),
+                    path,
+                }
+            })
+            .collect();
+
+        // Stage 1: every heartbeat but the newest one of its session.
+        let mut drop = vec![false; candidates.len()];
+        let mut newest: HashMap<&str, usize> = HashMap::new();
+        for (i, c) in candidates.iter().enumerate() {
+            if c.observed
+                && let Some(session) = c.session.as_deref()
+                && let Some(previous) = newest.insert(session, i)
+            {
+                drop[previous] = true;
             }
-            let session = match cache.get(&path) {
-                Some((_, _, Some(ev))) => Some(ev.session_id.clone()),
-                // Cached as unparseable: clean it up rather than keep it.
-                Some(_) => None,
-                None => Self::read_one(&path)
-                    .ok()
-                    .filter(|e| e.is_valid())
-                    .map(|e| e.session_id),
-            };
-            if session.as_deref().is_some_and(|s| keep.contains(s)) {
-                continue;
-            }
-            if fs::remove_file(&path).is_ok() {
-                cache.remove(&path);
-                removed += 1;
+        }
+        let compacted = drop.iter().filter(|d| **d).count();
+
+        // Stage 2: still too many?  Drop the oldest sessions, `keep` intact.
+        let remaining = candidates.len() - compacted;
+        if remaining > Self::PRUNE_TRIGGER {
+            let mut excess = remaining - Self::PRUNE_TARGET;
+            for (i, c) in candidates.iter().enumerate() {
+                if excess == 0 {
+                    break;
+                }
+                if drop[i] || c.session.as_deref().is_some_and(|s| keep.contains(s)) {
+                    continue;
+                }
+                drop[i] = true;
                 excess -= 1;
+            }
+        }
+
+        let mut removed = 0;
+        for (i, c) in candidates.iter().enumerate() {
+            if drop[i] && fs::remove_file(&c.path).is_ok() {
+                cache.remove(&c.path);
+                removed += 1;
             }
         }
         if removed > 0 {
             tracing::info!(
-                "pruned {} finished events from {} to stay under {} files",
-                removed,
-                dir.display(),
-                Self::PRUNE_TARGET
+                "pruned {removed} events from {} ({compacted} superseded heartbeats)",
+                dir.display()
             );
         }
     }
@@ -508,15 +544,54 @@ mod tests {
     }
 
     #[test]
-    fn prune_drops_oldest_but_keeps_live_sessions() {
+    fn prune_compacts_superseded_heartbeats() {
+        // One rest emits a `rest.observed` every 30 s; only the newest one is
+        // ever read, so the rest must be compacted away.
         let tmp = TempDir::new().unwrap();
         let store = EventStore::new(tmp.path());
         fs::create_dir_all(store.results_dir()).unwrap();
-        let mk = |sid: &str| {
+        let event = |id: &str, kind: &str, sid: &str| {
             format!(
                 concat!(
                     r#"{{"schema":"input-locker.event/v1","eventId":"{}","#,
-                    r#""sessionId":"{}","type":"rest.observed","#,
+                    r#""sessionId":"{}","type":"{}","#,
+                    r#""recordedAt":"2026-09-08T03:00:00Z","data":{{}}}}"#
+                ),
+                id, sid, kind
+            )
+        };
+        for i in 0..MAX_READ_BATCH + 20 {
+            let path = store.results_dir().join(format!("o{i:040}.json"));
+            fs::write(path, event(&format!("o{i}"), OBSERVED, "s1")).unwrap();
+        }
+        fs::write(
+            store.results_dir().join("locked.json"),
+            event("locked", LOCKED, "s1"),
+        )
+        .unwrap();
+
+        store.prune(&store.results_dir(), &HashSet::new());
+
+        let names: Vec<String> = fs::read_dir(store.results_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "heartbeats collapse to one: {names:?}");
+        // The newest heartbeat (highest index, sorted last) is the survivor.
+        assert!(names.contains(&format!("o{:040}.json", MAX_READ_BATCH + 19)));
+        assert!(names.contains(&"locked.json".to_string()));
+    }
+
+    #[test]
+    fn prune_budgets_old_sessions_but_keeps_live() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.results_dir()).unwrap();
+        let event = |sid: &str| {
+            format!(
+                concat!(
+                    r#"{{"schema":"input-locker.event/v1","eventId":"{}","#,
+                    r#""sessionId":"{}","type":"rest.locked","#,
                     r#""recordedAt":"2026-09-08T03:00:00Z","data":{{}}}}"#
                 ),
                 Uuid::new_v4(),
@@ -526,7 +601,11 @@ mod tests {
         // File 0 is the oldest and belongs to the session still holding the lock.
         for i in 0..MAX_READ_BATCH + 20 {
             let sid = if i == 0 { "live" } else { "done" };
-            fs::write(store.results_dir().join(format!("{i:040}.json")), mk(sid)).unwrap();
+            fs::write(
+                store.results_dir().join(format!("{i:040}.json")),
+                event(sid),
+            )
+            .unwrap();
         }
         let keep: HashSet<String> = ["live".to_string()].into_iter().collect();
         store.prune(&store.results_dir(), &keep);
