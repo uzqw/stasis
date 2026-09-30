@@ -44,16 +44,12 @@ Legend: PASS = observed correct on the real desktop.
   and the UI shows 已成功解锁.
 - Wayland has no global-input protocol; the grab is at the evdev layer, so a
   nested KWin window does not confine it. Nested KWin was used to verify the
-  UI renders/launches correctly in an isolated session (screenshot below);
+  UI renders/launches correctly in an isolated session;
   real-grab cases ran on the authorized desktop.
 - Command-file `lock`/`unlock` polled and acked correctly
   (`input-locker-command.json` → `input-locker-ack.json`).
 
-## Evidence (committed under `docs/notes/`)
+## Evidence
 
-- `stasis-leg2-locked.png` — UI 已锁定 after UI-button lock.
-- `stasis-leg2-unlockmode.png` — armed, 输入密码解锁 + dots.
-- `stasis-leg2-wrongpwd.png` — 密码错误 after wrong password.
-- `stasis-leg2-unlocked.png` — back to 未锁定 after correct gesture.
-- `stasis-leg2-nested.png` — Stasis rendering inside nested KWin
-  (`wayland-stasis`, 1280×800), CJK clean, no tofu.
+Screenshots taken during this leg were removed from the repository (privacy);
+the per-case results above are the record.

@@ -81,8 +81,8 @@ test-only value in `%APPDATA%\stasis\config.json` (not a user secret).
   the evidence is the gesture line, the oracle flip and the operator's own
   report (终于第一次成功解锁了).
 
-Screenshots: [locked + armed](stasis-win-leg1-locked.png),
-[unlocked](stasis-win-leg1-unlocked.png). No `rest.*` event is emitted for a
+Screenshots taken during this leg were removed from the repository
+(privacy). No `rest.*` event is emitted for a
 manual lock/unlock — correct, there is no active rest session; the isolated
 events dir stayed empty.
 

@@ -16,6 +16,11 @@ rest-break/pending.json
 # OS noise
 .DS_Store
 
+# Screenshots may expose private data — do not commit them
+docs/notes/*.png
+docs/notes/*.jpg
+docs/notes/*.jpeg
+
 
 # Added by cargo
 
