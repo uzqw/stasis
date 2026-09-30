@@ -41,7 +41,14 @@ const CJK_FONTS: &[(&str, u32)] = &[
     ("C:\\Windows\\Fonts\\simsun.ttc", 0),
 ];
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+const CJK_FONTS: &[(&str, u32)] = &[
+    ("/System/Library/Fonts/PingFang.ttc", 0),
+    ("/System/Library/Fonts/STHeiti Light.ttc", 0),
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+];
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 const CJK_FONTS: &[(&str, u32)] = &[];
 
 /// 挂一个系统 CJK 字体做 fallback，否则中文标签渲染成豆腐块。
