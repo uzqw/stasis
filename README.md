@@ -16,7 +16,7 @@ unlocking never depends on window focus or UI responsiveness.**
 |---|---|
 | Linux | Verified end-to-end on a real KDE Plasma + Wayland desktop (evdev grab, `j`×3 gesture, password unlock, command-file protocol). |
 | Windows | Verified on a physical Windows 11 machine (console session, unelevated). Lock/unlock main path confirmed; some edge cases open (see below). |
-| macOS | Implemented (CGEventTap backend). **Compiles and launches; real-desktop lock/unlock not yet verified.** Requires Accessibility permission. |
+| macOS | Implemented (CGEventTap backend). **Real-desktop lock/unlock verified** (short scheduled session, auto-unlock on time). Accessibility permission required; a full automatic rest cycle was interrupted by the machine going offline, see the repair note. |
 
 Unlock gesture (since 2026-09-14): **press `j` three times within 2 seconds**,
 then type the password and Enter. Older notes referencing CapsLock×3 are stale.
@@ -27,7 +27,8 @@ then type the password and Enter. Older notes referencing CapsLock×3 are stale.
 - [ADR 0001](docs/adr/0001-rust-rewrite-shared-core.md) — why a rewrite, why a
   shared core.
 - Verification notes live under [docs/notes/](docs/notes/) (Linux leg2,
-  Windows leg1, Windows unlock incident 2026-09-23).
+  Windows leg1, Windows unlock incident 2026-09-23, macOS scheduling repair
+  2026-09-30).
 
 ## Layout
 
@@ -63,6 +64,11 @@ The event tap needs
 **Accessibility permission** (System Settings → Privacy & Security →
 Accessibility); without it `CGEventTapCreate` returns NULL and the app tells you
 which pane to open.
+
+Scheduling side: `aide` must be launched with `LOCKER_CONFIG` pointing at a
+locker config, otherwise its event directory resolves against the launchd cwd
+and events land where Stasis never looks. Root cause and fix:
+[macOS scheduling repair](docs/notes/rest-break-mac-scheduling-repair-2026-09-30.md).
 
 Deploying stasis + rest-break + their launchd agents on macOS looks like:
 

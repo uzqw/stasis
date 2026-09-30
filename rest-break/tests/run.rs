@@ -184,6 +184,181 @@ fn setup(
     (aw, mcp, dir_env(&dir), dir)
 }
 
+// Mock submission responses with optional publication before an ambiguous failure.
+fn submission_server(
+    status: u16,
+    result: Value,
+    publish: bool,
+) -> (Server, std::sync::Arc<AtomicUsize>) {
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let request = std::sync::Mutex::new(None::<Value>);
+    let server = serve(move |_, _, body| {
+        let rpc: Value = serde_json::from_slice(body).unwrap();
+        match rpc["params"]["name"].as_str().unwrap() {
+            "request_rest" => {
+                count.fetch_add(1, Ordering::SeqCst);
+                *request.lock().unwrap() = Some(rpc["params"]["arguments"].clone());
+                (
+                    status,
+                    json!({"jsonrpc":"2.0", "id":1, "result":result}).to_string(),
+                )
+            }
+            "get_rest_sessions" => {
+                let sessions =
+                    if publish {
+                        request.lock().unwrap().as_ref().map(|args| json!([{
+                        "id": args["sessionId"], "phase":"waiting",
+                        "lockAt":args["lockAt"], "unlockAt":args["unlockAt"], "segments":[]
+                    }])).unwrap_or(json!([]))
+                    } else {
+                        json!([])
+                    };
+                (
+                    200,
+                    json!({"jsonrpc":"2.0", "id":1, "result":{
+                        "content":[{"type":"text", "text":sessions.to_string()}]
+                    }})
+                    .to_string(),
+                )
+            }
+            name => panic!("unexpected tool {name}"),
+        }
+    });
+    (server, calls)
+}
+
+#[test]
+fn explicit_rejection_exposes_cause_and_does_not_block_retries() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let (server, calls) = submission_server(
+        200,
+        json!({"isError":true, "content":[{
+            "type":"text", "text":"mkdir reports: read-only file system"
+        }]}),
+        false,
+    );
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+    for _ in 0..2 {
+        let (code, out, err) = run_capture(&env, &[]);
+        assert_eq!(code, 1);
+        assert!(!serde_json::from_str::<Decision>(&out).unwrap().due);
+        assert!(err.contains("read-only file system"), "{err}");
+        assert!(!err.contains("响应无 sessionId"));
+        assert!(!dir.join(PENDING_FILE).exists());
+        let s: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+        assert_eq!(s["state"], "error");
+        assert_eq!(s["nextRestAt"], "");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn ambiguous_failure_keeps_guard_and_original_cause() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let (server, calls) = submission_server(500, json!({}), false);
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+    assert_eq!(run_capture(&env, &[]).0, 1);
+    let PendingFile::Present(p) = read_pending(&dir.join(PENDING_FILE)) else {
+        panic!("no guard")
+    };
+    assert!(p.last_error.contains("500"), "{}", p.last_error);
+    let (code, out, _) = run_capture(&env, &[]);
+    assert_eq!(code, 0);
+    assert!(!serde_json::from_str::<Decision>(&out).unwrap().due);
+    let s: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(s["state"], "blocked");
+    assert_eq!(s["nextRestAt"], "");
+    assert!(s["reason"].as_str().unwrap().contains("500"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn lost_response_is_reconciled_without_duplicate_submission() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let (server, calls) = submission_server(500, json!({}), true);
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+    assert_eq!(run_capture(&env, &[]).0, 0);
+    assert!(!dir.join(PENDING_FILE).exists());
+    let s: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(s["state"], "scheduled");
+    let lock_at = parse_time(s["nextRestAt"].as_str().unwrap()).unwrap();
+    assert!(lock_at > Utc::now());
+    // Simulate a crash before pending cleanup. The next run must reconcile by ID.
+    let sessions = fetch_rest_sessions(&env).unwrap();
+    write_json_atomic(
+        &dir.join(PENDING_FILE),
+        &Pending {
+            session_id: sessions[0]["id"].as_str().unwrap().into(),
+            started_at: iso(Utc::now()),
+            expires_at: iso(Utc::now() + Duration::minutes(35)),
+            last_error: "response lost".into(),
+        },
+    )
+    .unwrap();
+    let before = std::fs::read(dir.join(PENDING_FILE)).unwrap();
+    let (code, out, _) = run_capture(&env, &["--check"]);
+    assert_eq!(code, 0);
+    assert!(!serde_json::from_str::<Decision>(&out).unwrap().due);
+    assert_eq!(std::fs::read(dir.join(PENDING_FILE)).unwrap(), before);
+    let (code, out, _) = run_capture(&env, &[]);
+    assert_eq!(code, 0);
+    assert!(!serde_json::from_str::<Decision>(&out).unwrap().due);
+    assert!(!dir.join(PENDING_FILE).exists());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn pending_and_waiting_session_do_not_hide_observation_errors() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let (server, _) = submission_server(500, json!({}), true);
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+    assert_eq!(run_capture(&env, &[]).0, 0);
+    fn fail_get(_: &str) -> Result<Vec<u8>, String> {
+        Err("AW unavailable".into())
+    }
+    let env = Env::for_test(dir.clone(), fail_get, mcp_url_slot);
+    for with_pending in [false, true] {
+        if with_pending {
+            write_json_atomic(
+                &dir.join(PENDING_FILE),
+                &Pending {
+                    session_id: "unconfirmed-other-request".into(),
+                    started_at: iso(Utc::now()),
+                    expires_at: iso(Utc::now() + Duration::minutes(35)),
+                    last_error: "timeout".into(),
+                },
+            )
+            .unwrap();
+        }
+        let (_, out, _) = run_capture(&env, &["--check"]);
+        let d: Decision = serde_json::from_str(&out).unwrap();
+        assert_eq!(d.reason, "error:AW unavailable");
+        let s: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+        assert_eq!(s["state"], "error");
+        assert_eq!(s["nextRestAt"], "");
+    }
+}
+
+#[test]
+fn preflight_failure_does_not_create_pending() {
+    let _g = serial();
+    let server = serve(|_, _, _| (500, "unavailable".into()));
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir_env(dir.path());
+    assert!(execute_rest_request(&env, &decision(Utc::now(), "due", 3600.0, 10)).is_err());
+    assert!(!dir.path().join(PENDING_FILE).exists());
+}
+
 // ---- main_test.go 移植 ----
 
 #[test]
@@ -217,12 +392,23 @@ fn uncertain_execution_suppresses_due_decision() {
         session_id: String::new(),
         started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         expires_at: (Utc::now() + Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true),
+        last_error: "request timed out".into(),
     };
     std::fs::write(dir.join(PENDING_FILE), serde_json::to_vec(&p).unwrap()).unwrap();
     let (code, out, _) = run_capture(&env, &[]);
     assert_eq!(code, 0);
     let d: Decision = serde_json::from_str(&out).unwrap();
     assert!(!d.due, "pending 防重应抑制 due: {d:?}");
+    let status: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(status["state"], "blocked");
+    assert_eq!(status["nextRestAt"], "");
+    assert!(
+        status["reason"]
+            .as_str()
+            .unwrap()
+            .contains("request timed out")
+    );
 }
 
 #[test]
@@ -233,6 +419,7 @@ fn expired_protection_no_longer_suppresses_checks() {
         session_id: String::new(),
         started_at: "2000-01-01T00:00:00Z".into(),
         expires_at: "2000-01-01T00:00:00Z".into(),
+        last_error: String::new(),
     };
     std::fs::write(dir.join(PENDING_FILE), serde_json::to_vec(&p).unwrap()).unwrap();
     let (code, out, _) = run_capture(&env, &["--check"]);

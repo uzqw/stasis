@@ -36,11 +36,17 @@ pub fn load(path: &Path) -> Result<UiStatus, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("状态文件解析失败: {e}"))
 }
 
-/// ISO 时间字符串取 HH:MM（按字符串自身时区取墙钟时分，status.json 写的是北京时间）。
+/// All UI timestamps use the same system-local timezone, including the summary.
 fn hhmm(iso: &str) -> String {
     DateTime::parse_from_rfc3339(iso)
-        .map(|t| t.format("%H:%M").to_string())
-        .unwrap_or_else(|_| iso.to_string())
+        .map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
+        .unwrap_or_else(|_| {
+            if iso.is_empty() {
+                "-".into()
+            } else {
+                iso.into()
+            }
+        })
 }
 
 fn minutes(v: f64) -> String {
@@ -51,36 +57,117 @@ fn minutes(v: f64) -> String {
     }
 }
 
-/// 一行摘要：与现役 overlay 文本同构——疲劳分钟 · 下次休息时间 · 时长。
+fn pending_info(reason: &str) -> Option<(&str, &str)> {
+    let value = reason
+        .strip_prefix("request_unconfirmed_until:")
+        .or_else(|| reason.strip_prefix("上次执行结果待确认，防重至 "))?;
+    Some(value.split_once(";last_error:").unwrap_or((value, "")))
+}
+
+/// Distinguish forecasts, accepted requests and failures; a forecast is not a schedule.
 pub fn summary_line(s: &UiStatus) -> String {
+    let fatigue = format!("疲劳 {} 分钟", minutes(s.fatigue_minutes));
+    if let Some((until, _)) = pending_info(&s.reason) {
+        return format!("{fatigue} · 请求未确认 · {} 后重试", hhmm(until));
+    }
     if s.state == "error" {
-        return "休息状态数据不可用".to_string();
+        return format!("{fatigue} · 安排/检查失败（展开查看）");
+    }
+    if s.state == "active" {
+        return format!("{fatigue} · 正在休息");
     }
     format!(
-        "疲劳 {} 分钟 · 下次 {} 开始 · {} 分钟",
-        minutes(s.fatigue_minutes),
+        "{fatigue} · {} {} 休息 · {} 分钟",
+        if s.state == "scheduled" {
+            "已安排"
+        } else {
+            "预计"
+        },
         hhmm(&s.next_rest_at),
         s.next_rest_minutes
     )
+}
+
+fn reason_text(reason: &str) -> String {
+    if let Some((until, error)) = pending_info(reason) {
+        let mut text = format!(
+            "休息请求尚未确认，暂不重复提交；{} 后重试",
+            local_time(until)
+        );
+        if !error.is_empty() {
+            text.push_str(&format!("；上次错误：{error}"));
+        }
+        return text;
+    }
+    if let Some(error) = reason.strip_prefix("error:") {
+        return error.into();
+    }
+    if reason.starts_with("rest_requested:") {
+        return "休息请求已接受，等待 Stasis 锁定".into();
+    }
+    if reason == "rest_active" {
+        return "Stasis 已确认实际锁定".into();
+    }
+    if reason == "currently_afk" {
+        return "正在离开电脑，不安排新的休息".into();
+    }
+    if reason.starts_with("below_fatigue_threshold:") {
+        return "疲劳尚未达到 60 分钟门槛".into();
+    }
+    if reason.starts_with("fatigue_threshold:") {
+        return "疲劳已达到休息门槛".into();
+    }
+    if reason.starts_with("rest_cooldown_until:") {
+        return "实际休息结束后，暂缓安排下一次休息".into();
+    }
+    if reason == "unknown_baseline" {
+        return "活动记录还不足以可靠判断疲劳".into();
+    }
+    reason.into()
 }
 
 /// ISO 时间转系统本地时区显示（"MM-dd HH:mm"），与状态文件写入时区无关。
 fn local_time(iso_str: &str) -> String {
     DateTime::parse_from_rfc3339(iso_str)
         .map(|t| t.with_timezone(&Local).format("%m-%d %H:%M").to_string())
-        .unwrap_or_else(|_| iso_str.to_string())
+        .unwrap_or_else(|_| {
+            if iso_str.is_empty() {
+                "-".into()
+            } else {
+                iso_str.into()
+            }
+        })
 }
 
 /// 详情字段（label, value）：完整展示 status.json 的九个字段，时间列统一本地时区。
 pub fn detail_lines(s: &UiStatus) -> Vec<(String, String)> {
     vec![
-        ("状态".into(), s.state.clone()),
+        (
+            "状态".into(),
+            match s.state.as_str() {
+                "ok" => "监测中",
+                "scheduled" => "已安排，等待锁定",
+                "active" => "正在休息",
+                "cooldown" => "休息后冷却",
+                "blocked" => "请求待确认",
+                "error" => "安排/检查失败",
+                other => other,
+            }
+            .into(),
+        ),
         ("疲劳（分钟）".into(), minutes(s.fatigue_minutes)),
         ("下次休息".into(), local_time(&s.next_rest_at)),
-        ("休息时长（分钟）".into(), s.next_rest_minutes.to_string()),
+        (
+            "休息时长（分钟）".into(),
+            if s.next_rest_at.is_empty() {
+                "-".into()
+            } else {
+                s.next_rest_minutes.to_string()
+            },
+        ),
         ("工作（分钟）".into(), minutes(s.work_minutes)),
         ("昼夜节律系数".into(), s.circadian.to_string()),
-        ("原因".into(), s.reason.clone()),
+        ("原因".into(), reason_text(&s.reason)),
         ("检查时间".into(), local_time(&s.checked_at)),
         (
             "冷却截止".into(),
@@ -188,25 +275,37 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn summary_formats_like_existing_overlay_text() {
+    fn summary_labels_forecasts_in_local_time() {
         let s: UiStatus = serde_json::from_str(OK).unwrap();
         assert_eq!(
             summary_line(&s),
-            "疲劳 55.5 分钟 · 下次 23:42 开始 · 10 分钟"
+            format!(
+                "疲劳 55.5 分钟 · 预计 {} 休息 · 10 分钟",
+                hhmm(&s.next_rest_at)
+            )
         );
     }
 
     #[test]
-    fn summary_uses_beijing_time_component() {
+    fn summary_and_details_use_local_time() {
         let s: UiStatus = serde_json::from_str(OK).unwrap();
-        assert!(summary_line(&s).contains("23:42"));
+        let expected = DateTime::parse_from_rfc3339(&s.next_rest_at)
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%H:%M")
+            .to_string();
+        assert!(summary_line(&s).contains(&expected));
+        assert!(detail_lines(&s)[2].1.ends_with(&expected));
     }
 
     #[test]
     fn error_state_reports_unavailable() {
         let mut s: UiStatus = serde_json::from_str(OK).unwrap();
         s.state = "error".into();
-        assert_eq!(summary_line(&s), "休息状态数据不可用");
+        assert_eq!(
+            summary_line(&s),
+            "疲劳 55.5 分钟 · 安排/检查失败（展开查看）"
+        );
     }
 
     #[test]
@@ -233,6 +332,34 @@ mod tests {
     }
 
     #[test]
+    fn unconfirmed_request_is_not_presented_as_a_schedule() {
+        let mut s: UiStatus = serde_json::from_str(OK).unwrap();
+        s.state = "blocked".into();
+        s.next_rest_at.clear();
+        s.reason = "request_unconfirmed_until:2026-09-30T16:13:04Z;last_error:timeout".into();
+        assert!(summary_line(&s).contains("请求未确认"));
+        assert!(summary_line(&s).contains(&hhmm("2026-09-30T16:13:04Z")));
+        let lines = detail_lines(&s);
+        assert_eq!(lines[2].1, "-");
+        assert_eq!(lines[3].1, "-");
+        assert!(lines[6].1.contains("暂不重复提交"));
+        assert!(lines[6].1.contains("timeout"));
+        assert!(!lines[6].1.contains("防重"));
+        s.reason = "上次执行结果待确认，防重至 2026-09-30T16:13:04Z".into();
+        assert!(summary_line(&s).contains("请求未确认"));
+    }
+
+    #[test]
+    fn accepted_request_and_active_lock_have_distinct_summaries() {
+        let mut s: UiStatus = serde_json::from_str(OK).unwrap();
+        s.state = "scheduled".into();
+        assert!(summary_line(&s).contains("已安排"));
+        assert!(!summary_line(&s).contains("预计"));
+        s.state = "active".into();
+        assert!(summary_line(&s).contains("正在休息"));
+    }
+
+    #[test]
     fn load_missing_file_is_error_not_panic() {
         let dir = tempdir();
         let err = load(&dir.join("status.json")).unwrap_err();
@@ -253,13 +380,18 @@ mod tests {
         let dir = tempdir();
         let path = dir.join("status.json");
         std::fs::write(&path, OK).unwrap();
-        assert!(summary_line(&load(&path).unwrap()).contains("23:42"));
+        assert_eq!(load(&path).unwrap().fatigue_minutes, 55.5);
         let updated = OK.replace("23:42", "00:15").replace("55.5", "61.0");
         std::fs::write(&path, updated).unwrap();
+        let s = load(&path).unwrap();
         assert_eq!(
-            summary_line(&load(&path).unwrap()),
-            "疲劳 61 分钟 · 下次 00:15 开始 · 10 分钟"
+            summary_line(&s),
+            format!(
+                "疲劳 61 分钟 · 预计 {} 休息 · 10 分钟",
+                hhmm(&s.next_rest_at)
+            )
         );
+        assert!(s.next_rest_at.contains("00:15"));
     }
 
     #[test]

@@ -500,6 +500,8 @@ pub struct Pending {
     pub session_id: String,
     pub started_at: String,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_error: String,
 }
 
 /// 读取 pending.json 的三种状态：不存在、存在（可能损坏）、读文件 IO 错。
@@ -517,6 +519,7 @@ pub fn read_pending(path: &std::path::Path) -> PendingFile {
             session_id: String::new(),
             started_at: String::new(),
             expires_at: "invalid".into(),
+            last_error: String::new(),
         })),
     }
 }
@@ -548,7 +551,7 @@ pub fn new_session_id() -> Result<String, String> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
-    pub state: String, // ok | cooldown | error
+    pub state: String, // ok | cooldown | scheduled | active | blocked | error
     pub fatigue_minutes: f64,
     pub circadian: f64,
     pub work_minutes: f64,
@@ -568,15 +571,32 @@ fn beijing(t: Time) -> String {
 
 /// 组装状态对象；写文件失败只告警由调用方处理。
 pub fn build_status(now: Time, result: &Decision, fatigue: f64, until: Option<Time>) -> Status {
+    let requested_at = result
+        .reason
+        .strip_prefix("rest_requested:")
+        .and_then(|s| parse_time(s).ok());
     let state = if result.reason.starts_with("error:") || result.reason.starts_with("invalid_data:")
     {
         "error"
+    } else if result.reason.starts_with("request_unconfirmed_until:") {
+        "blocked"
+    } else if requested_at.is_some() {
+        "scheduled"
+    } else if result.reason == "rest_active" {
+        "active"
     } else if until.is_some_and(|u| now < u) {
         "cooldown"
     } else {
         "ok"
     };
     let (next_at, next_min) = predict_next_rest(now, fatigue, until);
+    let (next_rest_at, next_rest_minutes) = if matches!(state, "error" | "blocked" | "active") {
+        (String::new(), 0)
+    } else if let Some(at) = requested_at {
+        (iso(at), result.rest_minutes)
+    } else {
+        (beijing(next_at), next_min)
+    };
     Status {
         state: state.into(),
         fatigue_minutes: (fatigue / 60.0 * 10.0).round() / 10.0,
@@ -584,8 +604,8 @@ pub fn build_status(now: Time, result: &Decision, fatigue: f64, until: Option<Ti
         work_minutes: result.work_minutes,
         due: result.due,
         rest_minutes: result.rest_minutes,
-        next_rest_at: beijing(next_at),
-        next_rest_minutes: next_min,
+        next_rest_at,
+        next_rest_minutes,
         cooldown_until: until.map(beijing).unwrap_or_default(),
         reason: result.reason.clone(),
         checked_at: iso(now),

@@ -155,6 +155,9 @@ fn parse_mcp_result(data: &[u8]) -> Result<String, String> {
                     out.push_str(c.get("text").and_then(Value::as_str).unwrap_or(""));
                 }
             }
+            if rpc["result"]["isError"].as_bool() == Some(true) {
+                return Err(format!("MCP tool error: {out}"));
+            }
             return Ok(out);
         }
         Err("无法解析 MCP 响应".into())
@@ -232,64 +235,75 @@ pub fn cleanup_expired_plans(env: &Env, stderr: &mut dyn Write) {
     }
 }
 
+/// aide 的 get_rest_sessions 用 `id` 返回会话标识（不是请求参数里的 `sessionId`）。
+fn session_key(s: &Value) -> &str {
+    ["id", "sessionId"]
+        .iter()
+        .find_map(|k| s[*k].as_str().filter(|v| !v.is_empty()))
+        .unwrap_or("")
+}
+
 /// 提交不可变 rest.requested 事件。请求不是 history：只有 InputLocker 的
 /// 结果事件能产生恢复额度。
-pub fn execute_rest_request(env: &Env, result: &Decision) -> Result<(), String> {
+pub fn execute_rest_request(env: &Env, result: &Decision) -> Result<Time, String> {
+    // Preflight has no submission side effects, so failure must not create pending.
+    let sessions = fetch_rest_sessions(env).map_err(|e| format!("读取休息会话失败: {e}"))?;
+    if sessions
+        .iter()
+        .any(|s| matches!(s["phase"].as_str(), Some("waiting" | "active")))
+    {
+        return Err("已有未结束休息会话".into());
+    }
     let started = Utc::now();
     let session_id = new_session_id()?;
-    let request_event_id = format!("{session_id}-requested");
     let pending_path = env.skill_dir.join(PENDING_FILE);
-    // 1. 一个 in-flight 请求在 35 分钟内抑制重复提交。
-    write_json_atomic(
-        &pending_path,
-        &Pending {
-            session_id: session_id.clone(),
-            started_at: started.to_rfc3339_opts(SecondsFormat::Secs, true),
-            expires_at: (started + Duration::minutes(35))
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
-        },
-    )?;
-    let sessions = fetch_rest_sessions(env).map_err(|e| format!("读取休息会话失败: {e}"))?;
-    for session in &sessions {
-        let phase = session.get("phase").and_then(Value::as_str).unwrap_or("");
-        if phase == "waiting" || phase == "active" {
-            // 重复提交已知无副作用，不应让不确定执行保护抑制 35 分钟检查。
-            let _ = std::fs::remove_file(&pending_path);
-            return Err("已有未结束休息会话".into());
-        }
-    }
+    let mut pending = Pending {
+        session_id: session_id.clone(),
+        started_at: iso(started),
+        expires_at: iso(started + Duration::minutes(35)),
+        last_error: String::new(),
+    };
+    write_json_atomic(&pending_path, &pending)?;
     let lock_at = Utc::now() + Duration::seconds(30);
     let unlock_at = lock_at + Duration::minutes(result.rest_minutes as i64);
-    let text = mcp_call(
+    let accepted = mcp_call(
         env,
         "request_rest",
         json!({
             "sessionId": session_id,
-            "eventId": request_event_id,
+            "eventId": format!("{session_id}-requested"),
             "lockAt": lock_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
             "unlockAt": unlock_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
             "source": "rest-break",
             "reason": result.reason,
         }),
     )
-    .map_err(|e| format!("提交休息请求失败: {e}"))?;
-    let accepted: Value = serde_json::from_str(&text).map_err(|_| "休息请求响应无 sessionId")?;
-    let accepted_id = accepted
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or("休息请求响应无 sessionId")?;
-    write_json_atomic(
-        &pending_path,
-        &Pending {
-            session_id: accepted_id.to_string(),
-            started_at: started.to_rfc3339_opts(SecondsFormat::Secs, true),
-            expires_at: (started + Duration::minutes(35))
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
-        },
-    )?;
-    let _ = std::fs::remove_file(&pending_path);
-    Ok(())
+    .and_then(|text| {
+        let reply: Value = serde_json::from_str(&text).map_err(|_| "休息请求响应无 sessionId")?;
+        reply["sessionId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "休息请求响应无 sessionId".to_string())
+            .map(|_| ())
+    });
+    if let Err(e) = accepted {
+        // A lost response can still have published a request. Reconcile by stable ID;
+        // absence alone does NOT justify retrying a transport/parse failure.
+        let observed = fetch_rest_sessions(env).ok();
+        let published = observed
+            .as_ref()
+            .is_some_and(|sessions| sessions.iter().any(|s| session_key(s) == session_id));
+        if published || (e.starts_with("MCP tool error:") && observed.is_some()) {
+            std::fs::remove_file(&pending_path).map_err(|e| e.to_string())?;
+            return if published { Ok(lock_at) } else { Err(e) };
+        }
+        pending.last_error = e.clone();
+        write_json_atomic(&pending_path, &pending)
+            .map_err(|w| format!("{e}; 保存请求错误失败: {w}"))?;
+        return Err(e);
+    }
+    std::fs::remove_file(&pending_path).map_err(|e| e.to_string())?;
+    Ok(lock_at)
 }
 
 fn status_path(env: &Env) -> PathBuf {
@@ -329,7 +343,7 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
         result = decision(now, format!("error:{e}"), 0.0, 0);
     }
     if sessions_result.is_ok() || check_only {
-        let sessions = sessions_result.ok().map(|s| json!(s));
+        let sessions = sessions_result.as_ref().ok().map(|s| json!(s));
         match fetch_events(env, now) {
             Err(e) => result = decision(now, format!("error:{e}"), 0.0, 0),
             Ok(events) => {
@@ -349,42 +363,120 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
         }
     }
 
-    // pending 防重：存在且未过期时不安排。
+    // Show the actual in-flight session, not a fatigue-only prediction.
+    if !result.reason.starts_with("error:")
+        && !result.reason.starts_with("invalid_data:")
+        && let Ok(sessions) = &sessions_result
+        && let Some(s) = sessions
+            .iter()
+            .find(|s| matches!(s["phase"].as_str(), Some("waiting" | "active")))
+    {
+        result.due = false;
+        if s["phase"] == "active" {
+            result.reason = "rest_active".into();
+        } else if let Some(e) = s["lastError"].as_str().filter(|e| !e.is_empty()) {
+            result.reason = format!("error:锁定失败：{e}");
+        } else {
+            result.reason = format!("rest_requested:{}", s["lockAt"].as_str().unwrap_or(""));
+            if let (Some(start), Some(end)) = (s["lockAt"].as_str(), s["unlockAt"].as_str())
+                && let (Ok(start), Ok(end)) = (parse_time(start), parse_time(end))
+            {
+                result.rest_minutes = (end - start).num_minutes() as i32;
+            }
+        }
+    }
+
+    let mut exit_code = 0;
     let pending_path = env.skill_dir.join(PENDING_FILE);
     match read_pending(&pending_path) {
         PendingFile::IoError(e) => {
-            let _ = writeln!(stderr, "读 pending.json 失败: {e}");
-            return 1;
+            result.due = false;
+            result.reason = format!("error:读 pending.json 失败: {e}");
+            let _ = writeln!(stderr, "{}", result.reason);
+            exit_code = 1;
         }
         PendingFile::Present(p) => match parse_time(&p.expires_at) {
             Err(_) => {
-                let _ = writeln!(stderr, "pending.json 无效，停止安排");
-                return 1;
+                result.due = false;
+                result.reason = "error:pending.json 无效，停止安排".into();
+                let _ = writeln!(stderr, "{}", result.reason);
+                exit_code = 1;
+            }
+            Ok(_)
+                if !p.session_id.is_empty()
+                    && sessions_result.as_ref().is_ok_and(|sessions| {
+                        sessions.iter().any(|s| session_key(s) == p.session_id)
+                    }) =>
+            {
+                // The request is confirmed by the event log, even if its response was lost.
+                if !check_only && let Err(e) = std::fs::remove_file(&pending_path) {
+                    result.due = false;
+                    result.reason = format!("error:清理已确认请求失败: {e}");
+                    exit_code = 1;
+                }
             }
             Ok(expires_at) if Utc::now() < expires_at => {
                 result.due = false;
-                result.reason = format!("上次执行结果待确认，防重至 {}", p.expires_at);
+                if !result.reason.starts_with("error:")
+                    && !result.reason.starts_with("invalid_data:")
+                    && !result.reason.starts_with("rest_requested:")
+                    && result.reason != "rest_active"
+                {
+                    result.reason = format!(
+                        "request_unconfirmed_until:{};last_error:{}",
+                        p.expires_at, p.last_error
+                    );
+                }
             }
             _ => {}
         },
         PendingFile::Absent => {}
     }
 
-    // 事件日志不可变；终态会话保持可重放，没有能在锁定期间抹掉执行事实的清理。
-
+    if !check_only && result.due {
+        match execute_rest_request(env, &result) {
+            Ok(lock_at) => result.reason = format!("rest_requested:{}", iso(lock_at)),
+            Err(e) => {
+                result.due = false;
+                result.reason = format!("error:安排休息失败：{e}");
+                let _ = writeln!(stderr, "{}", result.reason);
+                exit_code = 1;
+            }
+        }
+    }
+    // Publish the submission outcome immediately; never leave a failed request as state=ok.
     write_status(env, now, &result, fatigue, until, stderr);
-
     let _ = writeln!(
         stdout,
         "{}",
         serde_json::to_string(&result).expect("decision serializes")
     );
-    if check_only || !result.due {
-        return 0;
+    exit_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_are_matched_by_aide_id_key() {
+        // aide 返回 `id`；请求参数才是 `sessionId`。
+        assert_eq!(session_key(&json!({"id": "a"})), "a");
+        assert_eq!(session_key(&json!({"sessionId": "b"})), "b");
+        assert_eq!(session_key(&json!({"id": ""})), "");
     }
-    if let Err(e) = execute_rest_request(env, &result) {
-        let _ = writeln!(stderr, "执行失败，保留 pending.json 防重: {e}");
-        return 1;
+
+    #[test]
+    fn tool_errors_are_errors_in_json_and_sse() {
+        let rpc = json!({"jsonrpc":"2.0", "id":1, "result":{
+            "isError":true, "content":[{"type":"text", "text":"permission denied"}]
+        }})
+        .to_string();
+        for body in [rpc.clone(), format!("event: message\ndata: {rpc}\n\n")] {
+            assert_eq!(
+                parse_mcp_result(body.as_bytes()).unwrap_err(),
+                "MCP tool error: permission denied"
+            );
+        }
     }
-    0
 }
