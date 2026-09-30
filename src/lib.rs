@@ -1,3 +1,4 @@
+mod cjk_font;
 pub mod config;
 pub mod engine;
 pub mod keymap;

@@ -12,70 +12,10 @@
 
 use eframe::egui;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-/// 平台 CJK 字体候选：(路径, face index)，与根 crate `src/ui.rs` 同表。
-#[cfg(target_os = "linux")]
-const CJK_FONTS: &[(&str, u32)] = &[
-    ("/usr/share/fonts/droid/DroidSansFallbackFull.ttf", 0),
-    (
-        "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf",
-        0,
-    ),
-    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
-    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
-    (
-        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
-        0,
-    ),
-    ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
-    ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
-];
-
-#[cfg(target_os = "windows")]
-const CJK_FONTS: &[(&str, u32)] = &[
-    ("C:\\Windows\\Fonts\\msyh.ttc", 0),
-    ("C:\\Windows\\Fonts\\msyh.ttf", 0),
-    ("C:\\Windows\\Fonts\\simhei.ttf", 0),
-    ("C:\\Windows\\Fonts\\simsun.ttc", 0),
-];
-
-#[cfg(target_os = "macos")]
-const CJK_FONTS: &[(&str, u32)] = &[
-    ("/System/Library/Fonts/PingFang.ttc", 0),
-    ("/System/Library/Fonts/STHeiti Light.ttc", 0),
-    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
-];
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-const CJK_FONTS: &[(&str, u32)] = &[];
-
-/// 挂一个系统 CJK 字体做 fallback，否则中文标签渲染成豆腐块。
-fn install_fonts(ctx: &egui::Context) {
-    let Some((path, index)) = CJK_FONTS
-        .iter()
-        .find(|(p, _)| std::path::Path::new(p).is_file())
-    else {
-        eprintln!("rest-break-ui: 未找到 CJK 字体，中文可能显示为方框");
-        return;
-    };
-    let Ok(bytes) = std::fs::read(path) else {
-        return;
-    };
-    let mut data = egui::FontData::from_owned(bytes);
-    data.index = *index;
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("cjk".to_owned(), Arc::new(data));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("cjk".to_owned());
-    }
-    ctx.set_fonts(fonts);
-}
+#[path = "../../../src/cjk_font.rs"]
+mod cjk_font;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Corner {
@@ -462,23 +402,31 @@ fn ctx_drag(ctx: &egui::Context) {
 
 fn main() -> eframe::Result<()> {
     let config = Config::from_env();
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("rest-break-ui")
+        .with_app_id("rest-break-ui")
+        .with_always_on_top()
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_inner_size([340.0, 46.0])
+        .with_active(true);
+    // Avoid decoding/retaining eframe's generic egui Dock icon; use the OS icon.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_icon(egui::IconData::default());
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("rest-break-ui")
-            .with_app_id("rest-break-ui")
-            .with_always_on_top()
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_resizable(false)
-            .with_inner_size([340.0, 46.0])
-            .with_active(true),
+        viewport,
+        #[cfg(target_os = "macos")]
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
         "rest-break-ui",
         options,
         Box::new(move |cc| {
-            install_fonts(&cc.egui_ctx);
+            if cjk_font::install(&cc.egui_ctx).is_none() {
+                eprintln!("rest-break-ui: 未找到可读 CJK 字体，中文可能显示为方框");
+            }
             Ok(Box::new(App::new(config)))
         }),
     )

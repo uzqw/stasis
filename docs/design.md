@@ -256,6 +256,11 @@ UI 使用 Stasis 名字与完整标语，展示真实锁定状态、错误、解
 | 协议 | serde/serde_json、chrono、uuid、tempfile | 保留兼容 JSON；核实 Windows 原子替换语义 |
 | 日志 | tracing + 滚动文件 writer | 不在钩子回调同步写磁盘 |
 
+GUI 渲染后端：macOS 使用 wgpu/Metal，Linux/Windows 保留 glow；平台后端特性按目标启用。
+macOS 系统 CJK 字体通过进程生命周期的只读文件映射交给 egui，避免 `FontData` 的 owned
+字节被再次完整复制；仅映射系统只读字体，不扩展到用户可写文件。两个 GUI 复用同一字体模块，
+不裁剪字库；`rest-break` 默认依赖树仍不引入 GUI 或字体映射。
+
 不首选 rdev 的通用抓取封装：本项目需要可控的启动/停止、热插拔和故障语义，先评估其是否满足这些需
 求再决定。此前对其维护状况及特定系统崩溃的讨论未经充分验证，不作为已确认事实。
 

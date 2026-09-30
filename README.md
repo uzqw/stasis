@@ -54,7 +54,12 @@ Produces `target/release/stasis`, `rest-break/target/release/rest-break`, and
 
 macOS builds need no extra system deps beyond Xcode CLT — `core-foundation` /
 `core-graphics` are cargo deps. `rest-break-ui` picks a CJK font from
-`/System/Library/Fonts` (PingFang/STHeiti/Hiragino). The event tap needs
+`/System/Library/Fonts` (PingFang/STHeiti/Hiragino). Both GUIs use Metal on
+macOS and borrow a read-only mapping of the system CJK font, rather than
+retaining two heap copies of the whole collection. They use the OS Dock icon
+instead of decoding eframe's generic egui icon. Measurements and verification:
+[macOS GUI memory](docs/notes/macos-gui-memory-2026-09-30.md).
+The event tap needs
 **Accessibility permission** (System Settings → Privacy & Security →
 Accessibility); without it `CGEventTapCreate` returns NULL and the app tells you
 which pane to open.

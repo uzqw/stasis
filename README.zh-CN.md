@@ -92,7 +92,9 @@ cargo build --release --bin stasis
 
 - `stasis` 的 CGEventTap 需要 **辅助功能权限**（系统设置 → 隐私与安全性 → 辅助功能）；
   无权限时 `CGPreflightPostEventAccess` 会失败并在日志指明设置面板。
-- `rest-break-ui` 中文依赖 `/System/Library/Fonts` 下的 CJK 字体（PingFang/STHeiti/Hiragino）；
+- 两个 GUI 在 macOS 使用 Metal；中文依赖系统 CJK 字体（PingFang/STHeiti/Hiragino），
+  只读映射字体文件，避免在堆上保留两份完整字体；使用系统 Dock 图标，避免默认 egui 图像。
+  实测与验证见 [macOS GUI 内存记录](docs/notes/macos-gui-memory-2026-09-30.md)。
   macOS 分支的字体表已在 `rest-break/src/bin/rest-break-ui.rs` 内。
 - `rest-break` 判定还需要本机 aide MCP（`~/.config/mcp/mcp.json` 里的 `aide` 服务器）与
   ActivityWatch 的 `aw-watcher-afk_*` bucket。aw-server-rust 只是存储，AFK watcher 是独立

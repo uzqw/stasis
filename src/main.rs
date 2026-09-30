@@ -32,11 +32,17 @@ fn main() {
 
     let engine = Arc::new(stasis::engine::Engine::new(cfg));
 
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([400.0, 620.0])
+        .with_resizable(false)
+        .with_title("Stasis");
+    // Avoid decoding/retaining eframe's generic egui Dock icon; use the OS icon.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_icon(egui::IconData::default());
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 620.0])
-            .with_resizable(false)
-            .with_title("Stasis"),
+        viewport,
+        #[cfg(target_os = "macos")]
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
