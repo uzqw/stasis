@@ -14,7 +14,9 @@ pub struct Config {
     /// File permissions are tightened on save.
     pub password: String,
     /// Directory where aide writes plans and events.
-    /// Defaults to ~/Downloads for compatibility.
+    /// Defaults to the app data dir; ~/Downloads is TCC-protected and
+    /// blocks launchd-spawned processes on opendir (permission prompt can
+    /// never surface for a background daemon).
     #[serde(default = "default_events_dir")]
     pub events_dir: PathBuf,
 }
@@ -189,10 +191,14 @@ fn data_dir() -> io::Result<PathBuf> {
 }
 
 fn default_events_dir() -> PathBuf {
+    // ponytail: dirs::data_dir would be ideal but adding a dep for one path
+    // is not worth it; Application Support matches config.jsons location.
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
-            .join("Downloads")
-            .join("input-locker-events");
+            .join("Library")
+            .join("Application Support")
+            .join("stasis")
+            .join("events");
     }
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         return PathBuf::from(profile)

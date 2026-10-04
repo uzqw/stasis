@@ -7,6 +7,7 @@ license = "MIT"
 description = "Pause the machine. Rest the human."
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
@@ -18,6 +19,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+tray-icon = "0.21"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 eframe = { version = "0.36", default-features = false, features = [

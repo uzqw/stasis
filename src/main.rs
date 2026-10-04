@@ -32,6 +32,14 @@ fn main() {
 
     let engine = Arc::new(stasis::engine::Engine::new(cfg));
 
+    // Default: tray-icon mode (menu bar icon + native dropdown). Pass
+    // --windowed to keep the original always-open 400x620 window.
+    let windowed = std::env::args().any(|a| a == "--windowed");
+    if !windowed {
+        stasis::ui_tray::run(engine);
+        return;
+    }
+
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([400.0, 620.0])
         .with_resizable(false)

@@ -301,7 +301,8 @@ impl Controller {
                         .segments
                         .last()
                         .is_some_and(|seg| seg.unlocked_at.is_none());
-                    if locker.start_lock().is_ok() {
+                    let __lock_res = locker.start_lock();
+                    if __lock_res.is_ok() {
                         if open_segment {
                             out.push(("计划休息已恢复锁定".into(), true));
                             continue;
@@ -331,14 +332,15 @@ impl Controller {
                             }
                         }
                     } else {
+                        let __e = __lock_res.err().map(|e| e.to_string()).unwrap_or_default();
                         let _ = self.store.emit_result(
                             &s.session_id,
                             FAILED,
-                            json!({"action": "lock", "error": "lock failed", "retryable": true}),
+                            json!({"action": "lock", "error": format!("lock failed: {}", __e), "retryable": true}),
                             now,
                             None,
                         );
-                        out.push(("计划休息锁定失败".into(), false));
+                        out.push((format!("计划休息锁定失败: {}", __e).into(), false));
                     }
                 } else {
                     let through = s

@@ -7,3 +7,4 @@ pub mod platform;
 pub mod protocol;
 pub mod session;
 pub mod ui;
+pub mod ui_tray;
