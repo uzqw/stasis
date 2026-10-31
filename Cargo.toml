@@ -19,7 +19,9 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-tray-icon = "0.21"
+# `libxdo` is only used by muda's Linux menu accelerators, which this app
+# never defines; without this flag every Linux link needs xdotool installed.
+tray-icon = { version = "0.21", default-features = false }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 eframe = { version = "0.36", default-features = false, features = [
@@ -28,6 +30,9 @@ eframe = { version = "0.36", default-features = false, features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+# `stasis afk` posts afkstatus heartbeats to ActivityWatch.  Same client and
+# flags as rest-break (no TLS: the server is localhost-only).
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 [target.'cfg(windows)'.dependencies]
 embed-manifest = "1.5"

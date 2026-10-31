@@ -37,6 +37,18 @@ Linux 端已实现并在授权真实桌面（KDE Plasma + Wayland）完成端到
 完整测试记录与截图见
 [docs/notes/stasis-linux-realtest-leg2.md](docs/notes/stasis-linux-realtest-leg2.md)。
 
+### Omarchy 适配（Hyprland / Wayland）
+
+Omarchy 用 Hyprland + Quickshell。锁定后端不变（evdev 抓取发生在合成器之前，Wayland 下同样
+有效），UI 从托盘改为 omarchy shell 的 bar widget：
+
+```sh
+./omarchy/install.sh
+```
+
+脚本安装 `stasis daemon` 用户服务与 `stasis.rest` 状态栏组件；锁定需要 `input` 组权限。CLI、
+状态文件格式、插件设置与限制见 [docs/omarchy.md](docs/omarchy.md)。
+
 ### Windows 已验证（2026-09-20，真机）
 
 - 环境：物理机 Windows 11（build 10.0.26200），console 会话、进程不提权；受测构建
@@ -125,7 +137,10 @@ cargo build --release --bin stasis
 
 ```sh
 cargo build --release
-./target/release/stasis
+./target/release/stasis            # 托盘 / --windowed 窗口
+./target/release/stasis daemon     # 无 UI 引擎（Omarchy bar widget 后端）
+./target/release/stasis status     # 打印运行时状态
+./target/release/stasis rest 20    # 请求 20 分钟休息
 ```
 
 需要 `input` 组权限以抓取 `/dev/input/event*`，密码规则为物理 US 键盘 ASCII 字母/数字。

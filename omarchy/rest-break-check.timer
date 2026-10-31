@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh rest-break status every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=rest-break-check.service
+
+[Install]
+WantedBy=timers.target

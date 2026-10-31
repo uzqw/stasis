@@ -231,13 +231,40 @@ pub struct Controller {
     store: EventStore,
     /// Last directory prune, so the listing does not run on every tick.
     pruned_at: Option<DateTime<Utc>>,
+    /// Last lock attempt per session.  A backend that cannot grab (the user
+    /// is not in the `input` group, a device is busy) fails on every tick;
+    /// retrying once a second only floods the event store with identical
+    /// `rest.failed` records.  One attempt per window is enough to notice
+    /// recovery.
+    last_lock_attempt: HashMap<String, DateTime<Utc>>,
 }
+
+/// Minimum spacing between failed lock attempts for the same session.
+const LOCK_RETRY_BACKOFF: Duration = Duration::seconds(10);
 
 impl Controller {
     pub fn new(store: EventStore) -> Self {
         Self {
             store,
             pruned_at: None,
+            last_lock_attempt: HashMap::new(),
+        }
+    }
+
+    /// True when the previous attempt for this session failed recently.
+    /// A successful attempt clears the entry, so a backend flap (grab died,
+    /// fresh grab works) resumes immediately.
+    fn lock_failed_recently(&self, session_id: &str, now: DateTime<Utc>) -> bool {
+        self.last_lock_attempt
+            .get(session_id)
+            .is_some_and(|last| now.signed_duration_since(*last) < LOCK_RETRY_BACKOFF)
+    }
+
+    fn note_lock_attempt(&mut self, session_id: &str, now: DateTime<Utc>, ok: bool) {
+        if ok {
+            self.last_lock_attempt.remove(session_id);
+        } else {
+            self.last_lock_attempt.insert(session_id.to_string(), now);
         }
     }
 
@@ -301,7 +328,11 @@ impl Controller {
                         .segments
                         .last()
                         .is_some_and(|seg| seg.unlocked_at.is_none());
+                    if self.lock_failed_recently(&s.session_id, now) {
+                        continue;
+                    }
                     let __lock_res = locker.start_lock();
+                    self.note_lock_attempt(&s.session_id, now, __lock_res.is_ok());
                     if __lock_res.is_ok() {
                         if open_segment {
                             out.push(("计划休息已恢复锁定".into(), true));
@@ -340,7 +371,7 @@ impl Controller {
                             now,
                             None,
                         );
-                        out.push((format!("计划休息锁定失败: {}", __e).into(), false));
+                        out.push((format!("计划休息锁定失败: {}", __e), false));
                     }
                 } else {
                     let through = s
@@ -428,7 +459,12 @@ impl Controller {
             if locker.is_locked() {
                 continue;
             }
-            if locker.start_lock().is_ok() {
+            if self.lock_failed_recently(&s.session_id, now) {
+                continue;
+            }
+            let lock_res = locker.start_lock();
+            self.note_lock_attempt(&s.session_id, now, lock_res.is_ok());
+            if lock_res.is_ok() {
                 match self.store.emit_result(
                     &s.session_id,
                     LOCKED,
@@ -707,6 +743,33 @@ mod tests {
         // phase stays waiting because retryable
         let sessions = ctrl.sessions(base());
         assert_eq!(sessions["s1"].phase, Phase::Waiting);
+    }
+
+    #[test]
+    fn lock_retry_is_backed_off() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = FakeLocker {
+            locked: false,
+            fail_start: true,
+            fail_stop: false,
+        };
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        assert!(ctrl.tick(&mut locker, base()).iter().any(|(_, ok)| !ok));
+        // Within the backoff window the backend is not poked again, so no
+        // second failure record is produced.
+        assert!(
+            ctrl.tick(&mut locker, base() + Duration::seconds(1))
+                .is_empty()
+        );
+        // After the window a retry is attempted.
+        assert!(
+            ctrl.tick(&mut locker, base() + Duration::seconds(11))
+                .iter()
+                .any(|(_, ok)| !ok)
+        );
     }
 
     #[test]

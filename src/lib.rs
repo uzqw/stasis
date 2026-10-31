@@ -1,3 +1,4 @@
+pub mod afk;
 mod cjk_font;
 pub mod config;
 pub mod engine;
@@ -6,5 +7,6 @@ pub mod keypad;
 pub mod platform;
 pub mod protocol;
 pub mod session;
+pub mod status;
 pub mod ui;
 pub mod ui_tray;

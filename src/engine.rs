@@ -1,15 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::config::Config;
 use crate::keypad::{Action, Keypad};
 use crate::platform::{BackendEvent, Grab};
 use crate::protocol::EventStore;
-use crate::session::{Controller, LockOps};
+use crate::session::{Controller, LockOps, Phase};
+use crate::status::{SessionInfo, Status};
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -147,7 +148,13 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     let mut keypad = Keypad::new();
     let tick_rx = crossbeam_channel::tick(Duration::from_secs(1));
     let mut last_poll = Instant::now();
-    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    let mut last_status: Option<Instant> = None;
+    // The status file is what the Omarchy bar widget reads.  Publishing it
+    // from the top of the loop (instead of from each branch) covers every
+    // transition without threading the controller through each one; the
+    // throttle keeps password typing from rewriting the file per keystroke.
+    const STATUS_INTERVAL: Duration = Duration::from_millis(250);
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
     /// Windows can keep a low-level hook installed yet stop calling it (the
     /// hooking process holds — or just released to an empty desktop — the
     /// foreground).  When unlock mode arms and no backend event arrives
@@ -159,6 +166,11 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     let mut armed_at: Option<Instant> = None;
 
     loop {
+        if last_status.is_none_or(|t| t.elapsed() >= STATUS_INTERVAL) {
+            last_status = Some(Instant::now());
+            publish_status(&snapshot, &controller, &events_dir, Utc::now(), true);
+        }
+
         // Determine which channels to select on this iteration.
         let backend_rx: Option<Receiver<BackendEvent>> = match &backend.state {
             BackendState::Locked { rx, .. } => Some(rx.clone()),
@@ -447,6 +459,55 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     update(&snapshot, |s| {
         s.locked = false;
     });
+    publish_status(&snapshot, &controller, &events_dir, Utc::now(), false);
+}
+
+/// Write the runtime snapshot external UIs (Omarchy bar widget) read.
+///
+/// Sessions are replayed from the event store rather than tracked in a
+/// separate field, so the published countdown is the same projection the
+/// engine itself locks and unlocks against.
+fn publish_status(
+    snapshot: &Arc<Mutex<Snapshot>>,
+    controller: &Controller,
+    events_dir: &Path,
+    now: DateTime<Utc>,
+    running: bool,
+) {
+    let snap = match snapshot.lock() {
+        Ok(s) => s.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let session = controller
+        .sessions(now)
+        .into_values()
+        .filter(|s| matches!(s.phase, Phase::Active | Phase::Waiting) && now < s.unlock_at)
+        .min_by_key(|s| (s.phase != Phase::Active, s.lock_at))
+        .map(|s| SessionInfo {
+            session_id: s.session_id,
+            phase: if s.phase == Phase::Active {
+                "active"
+            } else {
+                "waiting"
+            }
+            .into(),
+            lock_at: crate::status::iso(s.lock_at),
+            unlock_at: crate::status::iso(s.unlock_at),
+        });
+    let mut status = Status::new(
+        snap.locked,
+        snap.unlock_mode,
+        snap.password_len,
+        snap.message,
+        snap.ok,
+        events_dir,
+        session,
+        now,
+    );
+    status.running = running;
+    if let Err(e) = status.write(&Config::status_path()) {
+        tracing::debug!("status file write failed: {e}");
+    }
 }
 
 fn handle_keypad_action(

@@ -1,0 +1,15 @@
+[Unit]
+Description=Stasis AFK publisher (ActivityWatch)
+# Wayland has no global input API; this reads evdev read-only so rest-break
+# can compute the current work stretch.  Locking does not depend on it.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/stasis afk
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -109,6 +109,7 @@ src/
   session.rs           休息事件投影与调度规则
   protocol.rs          事件/command/ack 文件读写
   config.rs            配置、路径、密码验证
+  status.rs            对外只读状态快照（bar widget 用）
   engine.rs            唯一业务状态所有者
   ui.rs                eframe 展示与命令发送
   platform/
@@ -243,6 +244,22 @@ Program Files、macOS app bundle 不应成为可写数据目录。
 
 UI 使用 Stasis 名字与完整标语，展示真实锁定状态、错误、解锁模式、密码长度和协议目录。默认不依赖
 自动最小化/抢焦点完成流程。中文字体、键盘导航、对比度和未锁定时的密码修改可访问性纳入验收。
+
+### 7.1 桌面外壳集成（Omarchy）
+
+Omarchy 用 Hyprland + Quickshell。锁定后端不变（evdev 抓取发生在合成器之前）；UI 改为
+`stasis daemon` + omarchy shell 的 bar widget，不依赖托盘或置顶窗口（Wayland 下后者本就不
+可靠）。
+
+对外只暴露两类接口，都不是控制通道：
+
+- **状态文件**：`$XDG_STATE_HOME/stasis/status.json`，引擎每秒原子替换，权限 `0600`，内容
+  是只读投影（锁状态、当前会话的 `unlockAt`、最近消息）。读者以 `updatedAt` 判断存活，超过
+  5 秒视为进程已退出；进程被信号终止时不保证写 `running=false`。
+- **CLI**：`stasis rest N` 写 `rest.requested` 事件（与 aide 同一协议），`stasis lock/unlock`
+  走既有 command-file 协议。解锁仍然只认密码手势，状态文件与 bar 都不能绕过它。
+
+实现与限制见 [omarchy.md](omarchy.md)。
 
 ## 8. 技术选型（候选，不是验证结论）
 

@@ -152,6 +152,42 @@ impl Config {
         Ok(())
     }
 
+    /// Directory for runtime state shared with external UIs (bar widgets).
+    /// Deliberately not `~/.config`: this is rewritten every second.
+    pub fn state_dir() -> PathBuf {
+        if let Ok(v) = std::env::var("STASIS_STATE_DIR") {
+            return PathBuf::from(v);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                return PathBuf::from(local).join(APP_NAME);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(dir) = data_dir() {
+                return dir;
+            }
+        }
+        // Linux / generic
+        if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+            return PathBuf::from(state).join(APP_NAME);
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("state")
+                .join(APP_NAME);
+        }
+        std::env::temp_dir().join(APP_NAME)
+    }
+
+    /// Engine-written snapshot read by the Omarchy bar widget.
+    pub fn status_path() -> PathBuf {
+        Self::state_dir().join("status.json")
+    }
+
     /// Effective events directory.
     pub fn effective_events_dir(&self) -> PathBuf {
         std::env::var("STASIS_EVENTS_DIR")
@@ -192,7 +228,20 @@ fn data_dir() -> io::Result<PathBuf> {
 
 fn default_events_dir() -> PathBuf {
     // ponytail: dirs::data_dir would be ideal but adding a dep for one path
-    // is not worth it; Application Support matches config.jsons location.
+    // is not worth it; Application Support matches config.json's location.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(data).join(APP_NAME).join("events");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(APP_NAME)
+                .join("events");
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
             .join("Library")

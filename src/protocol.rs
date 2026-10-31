@@ -368,6 +368,25 @@ fn write_ack(dir: &Path, cmd: &Command, result: String, error: Option<String>) -
     fs::rename(&tmp, dir.join("input-locker-ack.json"))
 }
 
+/// Write a command record for the engine to pick up.  Same file and shape
+/// aide uses, so the engine has one command path, not two.
+pub fn write_command(dir: &Path, cmd: &str, id: &str) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(".tmp-command.json");
+    let record = Command {
+        cmd: cmd.to_string(),
+        id: id.to_string(),
+    };
+    fs::write(&tmp, serde_json::to_string_pretty(&record)?)?;
+    fs::rename(&tmp, dir.join("input-locker-command.json"))
+}
+
+/// Read the most recent ack record, if any.
+pub fn read_ack(dir: &Path) -> Option<Ack> {
+    let text = fs::read_to_string(dir.join("input-locker-ack.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// Check for a pending command file, atomically claim it, execute it,
 /// and write the ack.  A stale `.processing` left by a previous crash is
 /// treated as claimed and re-executed idempotently.
@@ -468,6 +487,25 @@ mod tests {
         assert_eq!(ack.id, "abc");
         assert_eq!(ack.result, "ok");
         assert!(!dir.join("input-locker-command.json.processing").exists());
+    }
+
+    #[test]
+    fn write_command_and_read_ack() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        write_command(dir, "lock", "cli1").unwrap();
+        poll_command(dir, |cmd| {
+            assert_eq!(cmd.cmd, "lock");
+            assert_eq!(cmd.id, "cli1");
+            Ok("ok".into())
+        })
+        .unwrap();
+
+        let ack = read_ack(dir).unwrap();
+        assert_eq!(ack.id, "cli1");
+        assert_eq!(ack.result, "ok");
+        assert!(!dir.join(".tmp-command.json").exists());
     }
 
     #[test]

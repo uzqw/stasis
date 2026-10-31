@@ -15,6 +15,7 @@ unlocking never depends on window focus or UI responsiveness.**
 | Platform | State |
 |---|---|
 | Linux | Verified end-to-end on a real KDE Plasma + Wayland desktop (evdev grab, `j`×3 gesture, password unlock, command-file protocol). |
+| Linux (Omarchy) | Daemon + bar widget verified on Hyprland/Wayland: build, status file, CLI, widget render, work-time display. Real evdev grab and scheduled unlock verified with `input` group membership; the `j`×3 gesture is not re-verified there yet. See [docs/omarchy.md](docs/omarchy.md). |
 | Windows | Verified on a physical Windows 11 machine (console session, unelevated). Lock/unlock main path confirmed; some edge cases open (see below). |
 | macOS | Implemented (CGEventTap backend). **Real-desktop lock/unlock verified** (short scheduled session, auto-unlock on time). Accessibility permission required; a full automatic rest cycle was interrupted by the machine going offline, see the repair note. |
 
@@ -34,6 +35,8 @@ then type the password and Enter. Older notes referencing CapsLock×3 are stale.
 
 ```text
 src/            stasis GUI + engine + platform backends (linux/windows/macos)
+omarchy/        Omarchy bar widget, systemd unit, install script
+docs/           design, plan, ADRs, notes, Omarchy port
 rest-break/     standalone crate: "when to rest" decision core + status UI
 examples/       manual real-machine test drivers
 tools/guard/    repo guard (docs, line width, secrets), zero-dep Rust bin
@@ -50,6 +53,20 @@ cargo build --release --features ui --bins --manifest-path rest-break/Cargo.toml
 
 Produces `target/release/stasis`, `rest-break/target/release/rest-break`, and
 `rest-break/target/release/rest-break-ui`.
+
+### Omarchy (Hyprland / Wayland)
+
+Omarchy uses the same evdev backend, so the grab still works under Wayland.
+The desktop UI is a Quickshell bar widget instead of the tray:
+
+```sh
+./omarchy/install.sh
+```
+
+This builds the binary, installs the `stasis.service` user unit, and enables the
+`stasis.rest` bar widget. Locking needs `input` group membership; details,
+CLI (`stasis daemon|status|rest`), status-file schema and limitations are in
+[docs/omarchy.md](docs/omarchy.md).
 
 ### macOS notes
 

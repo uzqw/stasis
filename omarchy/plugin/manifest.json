@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "stasis.rest",
+  "name": "Stasis",
+  "version": "0.1.0",
+  "author": "he-zhiyuan",
+  "license": "MIT",
+  "description": "Rest timer for the Omarchy bar: freezes keyboard and mouse for a set time, then unlocks.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Stasis",
+    "description": "Start a timed input-blocking rest and show the remaining time in the bar.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "binary": "~/.local/bin/stasis",
+      "durations": "5,10,20,30"
+    },
+    "schema": [
+      {
+        "key": "binary",
+        "type": "path",
+        "label": "stasis binary",
+        "defaultValue": "~/.local/bin/stasis",
+        "description": "Path to the stasis executable (the daemon and the widget must use the same build)."
+      },
+      {
+        "key": "durations",
+        "type": "string",
+        "label": "Rest lengths (minutes)",
+        "defaultValue": "5,10,20,30",
+        "description": "Comma-separated list shown in the popup."
+      },
+      {
+        "key": "statusFile",
+        "type": "path",
+        "label": "Status file",
+        "defaultValue": "",
+        "description": "Leave empty for $XDG_STATE_HOME/stasis/status.json (~/.local/state/stasis/status.json)."
+      },
+      {
+        "key": "restBreakStatusFile",
+        "type": "path",
+        "label": "rest-break status file (optional)",
+        "defaultValue": "",
+        "description": "Shows work time and next rest from rest-break. Leave empty to probe $XDG_STATE_HOME/rest-break/status.json and ~/stasis/rest-break/."
+      }
+    ]
+  }
+}

@@ -10,6 +10,7 @@
 | --- | --- |
 | [design.md](design.md) | 跨平台行为契约、架构、故障策略、协议兼容、技术选型 |
 | [implementation-plan.md](implementation-plan.md) | 分阶段实施与验收清单、回归用例 |
+| [omarchy.md](omarchy.md) | Omarchy 适配：daemon、bar widget、状态文件、权限与限制 |
 
 ## 决策记录（ADR）
 

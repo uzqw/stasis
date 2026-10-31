@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use eframe::egui;
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
     Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem},
 };
 
 use crate::engine::{Engine, Snapshot, UiCmd};
@@ -299,11 +299,11 @@ impl TrayApp {
                 // Update tray icon only when the displayed value changed —
                 // set_icon pokes AppKit layout, so keep it rare.
                 let mins = fatigue.round().clamp(0.0, 999.0) as u32;
-                if self.last_icon_minutes != Some(mins) {
-                    if let Some(icon) = make_minutes_icon(mins) {
-                        let _ = self._tray.set_icon(Some(icon));
-                        self.last_icon_minutes = Some(mins);
-                    }
+                if self.last_icon_minutes != Some(mins)
+                    && let Some(icon) = make_minutes_icon(mins)
+                {
+                    let _ = self._tray.set_icon(Some(icon));
+                    self.last_icon_minutes = Some(mins);
                 }
             }
             None => {
@@ -351,6 +351,27 @@ impl eframe::App for TrayApp {
     }
 }
 
+/// Run the tray-mode app. `windowed` falls back to the original 400×620 UI.
+pub fn run(engine: Arc<Engine>) {
+    // Viewport stays invisible — tray icon + NSMenu is the only UI.
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1.0, 1.0])
+            .with_visible(false)
+            .with_decorations(false)
+            .with_title("Stasis"),
+        ..Default::default()
+    };
+    let _ = eframe::run_native(
+        "Stasis",
+        native_options,
+        Box::new(|cc| {
+            crate::ui::install_style(&cc.egui_ctx);
+            Ok(Box::new(TrayApp::new(engine)))
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,7 +382,10 @@ mod tests {
             let (rgba, w, h) = render_minutes_rgba(mins).expect("renders");
             assert!(w > 0 && h > 0, "{mins}: sane size {w}x{h}");
             let painted = rgba.chunks(4).filter(|px| px[3] > 0).count();
-            assert!(painted > 50, "{mins}: expected painted pixels, got {painted}");
+            assert!(
+                painted > 50,
+                "{mins}: expected painted pixels, got {painted}"
+            );
         }
     }
 
@@ -383,25 +407,4 @@ mod tests {
         assert!(rb2.cooldown_remaining_minutes().is_none());
         assert!(rb2.error_text().is_none());
     }
-}
-
-/// Run the tray-mode app. `windowed` falls back to the original 400×620 UI.
-pub fn run(engine: Arc<Engine>) {
-    // Viewport stays invisible — tray icon + NSMenu is the only UI.
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1.0, 1.0])
-            .with_visible(false)
-            .with_decorations(false)
-            .with_title("Stasis"),
-        ..Default::default()
-    };
-    let _ = eframe::run_native(
-        "Stasis",
-        native_options,
-        Box::new(|cc| {
-            crate::ui::install_style(&cc.egui_ctx);
-            Ok(Box::new(TrayApp::new(engine)))
-        }),
-    );
 }

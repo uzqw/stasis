@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh rest-break status for the Omarchy bar
+# `--check` skips the aide scheduling path and only reads ActivityWatch, so
+# this is display-only: it never requests a rest.
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+Environment=STATUS_FILE=%S/rest-break/status.json
+Environment=AW_BASE_URL=http://localhost:5600/api/0
+ExecStart=%h/.local/bin/rest-break --check

@@ -1,0 +1,15 @@
+[Unit]
+Description=Stasis input locker daemon (Omarchy bar widget backend)
+# The daemon only needs /dev/input, not a display, but it belongs to the
+# graphical session: stopping on logout releases the evdev grab with it.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/stasis daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
