@@ -13,11 +13,14 @@
 //! - `stasis status`   — print the runtime snapshot the bar widget reads.
 //! - `stasis afk`      — publish AFK heartbeats to ActivityWatch so the bar
 //!   can show how long the current work stretch is (Linux/evdev).
+//! - `stasis autorest` — turn rest-break's due snapshot into a rest request
+//!   (meant for a once-a-minute timer).
 //!
 //! `stasis lock` / `stasis unlock` use the existing command-file protocol.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tracing::{error, info};
@@ -37,6 +40,7 @@ fn main() {
         Some("status") => std::process::exit(cli_status(args.iter().any(|a| a == "--json"))),
         Some("rest") => std::process::exit(cli_rest(&args[1..])),
         Some("afk") => std::process::exit(cli_afk(&args[1..])),
+        Some("autorest") => std::process::exit(cli_autorest(&args[1..])),
         Some("lock") => std::process::exit(cli_command("lock")),
         Some("unlock") => std::process::exit(cli_command("unlock")),
         _ => run_gui(&args),
@@ -190,38 +194,124 @@ fn cli_rest(args: &[String]) -> i32 {
         }
     }
 
+    match emit_rest(minutes, "omarchy-bar", "manual") {
+        Ok(session_id) => {
+            println!("{session_id}");
+            0
+        }
+        Err(e) => {
+            eprintln!("stasis: {e}");
+            1
+        }
+    }
+}
+
+/// Write the same `rest.requested` event aide and the bar use.
+fn emit_rest(minutes: u32, source: &str, reason: &str) -> Result<String, String> {
     let cfg = Config::load().unwrap_or_default();
     let store = EventStore::new(cfg.effective_events_dir());
-    if let Err(e) = store.ensure_dirs() {
-        eprintln!("stasis: cannot create event directory: {e}");
-        return 1;
-    }
-
+    store
+        .ensure_dirs()
+        .map_err(|e| format!("cannot create event directory: {e}"))?;
     let now = Utc::now();
     let session_id = Uuid::new_v4().to_string().replace('-', "");
     let data = serde_json::json!({
         "lockAt": stasis::status::iso(now),
         "unlockAt": stasis::status::iso(now + ChronoDuration::minutes(minutes as i64)),
-        "source": "omarchy-bar",
-        "reason": "manual",
+        "source": source,
+        "reason": reason,
     });
-    match store.emit(
-        &store.requests_dir(),
-        session_id.as_str(),
-        REQUESTED,
-        data,
-        now,
-        None,
-    ) {
-        Ok(event) => {
-            println!("{}", event.session_id);
-            0
-        }
-        Err(e) => {
-            eprintln!("stasis: cannot write rest request: {e}");
-            1
-        }
+    store
+        .emit(
+            &store.requests_dir(),
+            session_id.as_str(),
+            REQUESTED,
+            data,
+            now,
+            None,
+        )
+        .map(|event| event.session_id)
+        .map_err(|e| format!("cannot write rest request: {e}"))
+}
+
+/// Schedule a rest when rest-break says one is due.
+///
+/// rest-break's own scheduler calls aide tools (`request_rest`,
+/// `get_rest_sessions`) that the deployed aide build does not expose, so this
+/// reads the snapshot `rest-break --check` already writes and emits the
+/// request directly.  It never computes fatigue itself.
+fn cli_autorest(args: &[String]) -> i32 {
+    let value = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let cooldown = value("--cooldown")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        .clamp(1, 24 * 60);
+    let status_path = value("--status")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_rest_break_status);
+
+    let Some(snapshot) = stasis::autorest::read_status(&status_path) else {
+        return 0;
+    };
+
+    let stasis = Status::read(&Config::status_path());
+    let fresh = stasis
+        .as_ref()
+        .is_some_and(|s| s.is_fresh(ChronoDuration::seconds(5)));
+    // A stopped daemon would make the request fire whenever it next starts.
+    if !fresh {
+        return 0;
     }
+    let locked = stasis.as_ref().is_some_and(|s| {
+        s.locked
+            || s.session
+                .as_ref()
+                .is_some_and(|x| x.phase == "waiting" || x.phase == "active")
+    });
+
+    let cfg = Config::load().unwrap_or_default();
+    let store = EventStore::new(cfg.effective_events_dir());
+    let last = stasis::autorest::newest_result(&store.results_dir());
+    let decision = stasis::autorest::decide(
+        &snapshot,
+        locked,
+        last,
+        SystemTime::now(),
+        Duration::from_secs(cooldown * 60),
+    );
+    match decision {
+        Some(d) => match emit_rest(d.minutes, "rest-break", &d.reason) {
+            Ok(id) => {
+                eprintln!(
+                    "stasis autorest: scheduled {} min ({}) session {id}",
+                    d.minutes, d.reason
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("stasis autorest: {e}");
+                1
+            }
+        },
+        None => 0,
+    }
+}
+
+fn default_rest_break_status() -> PathBuf {
+    std::env::var("STASIS_REST_BREAK_STATUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            Config::state_dir()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("rest-break")
+                .join("status.json")
+        })
 }
 
 /// Publish AFK status to ActivityWatch (see `stasis::afk`).

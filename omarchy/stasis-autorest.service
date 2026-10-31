@@ -1,0 +1,7 @@
+[Unit]
+Description=Schedule a rest when rest-break says it is due
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/stasis autorest

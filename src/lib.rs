@@ -1,4 +1,5 @@
 pub mod afk;
+pub mod autorest;
 mod cjk_font;
 pub mod config;
 pub mod engine;

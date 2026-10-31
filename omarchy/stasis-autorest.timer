@@ -1,0 +1,11 @@
+[Unit]
+Description=Check rest-break's decision every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=stasis-autorest.service
+
+[Install]
+WantedBy=timers.target

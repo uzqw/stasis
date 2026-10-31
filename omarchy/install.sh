@@ -56,10 +56,13 @@ if [ "$with_afk" = 1 ]; then
   install -Dm644 "$repo_dir/omarchy/stasis-afk.service" "$unit_dir/stasis-afk.service"
   install -Dm644 "$repo_dir/omarchy/rest-break-check.service" "$unit_dir/rest-break-check.service"
   install -Dm644 "$repo_dir/omarchy/rest-break-check.timer" "$unit_dir/rest-break-check.timer"
+  install -Dm644 "$repo_dir/omarchy/stasis-autorest.service" "$unit_dir/stasis-autorest.service"
+  install -Dm644 "$repo_dir/omarchy/stasis-autorest.timer" "$unit_dir/stasis-autorest.timer"
   systemctl --user daemon-reload
   systemctl --user enable stasis-afk.service
   systemctl --user restart stasis-afk.service
   systemctl --user enable --now rest-break-check.timer
+  systemctl --user enable --now stasis-autorest.timer
   systemctl --user start rest-break-check.service || true
 fi
 
