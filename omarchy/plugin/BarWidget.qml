@@ -83,6 +83,12 @@ BarWidget {
   readonly property string nextRestAt: {
     return String(root.restBreak && root.restBreak.nextRestAt ? root.restBreak.nextRestAt : "")
   }
+  /// Minutes until the predicted rest; <= 0 means the model says "now".
+  readonly property double minutesUntilNextRest: {
+    var t = Date.parse(root.nextRestAt)
+    if (isNaN(t)) return -1
+    return (t - root.nowMs) / 60000
+  }
 
   property var state: ({})
   property bool online: false
@@ -164,9 +170,15 @@ BarWidget {
   readonly property string label: {
     if (root.online && root.locked) return clockText(remainingSeconds)
     if (root.starting) return "…"
-    // Idle: fatigue is what decides the next rest, so that is the number the
-    // bar shows.  Work time is context and lives in the tooltip.
-    if (root.restBreakOnline && root.fatigueMinutes >= 1) return formatMinutes(root.fatigueMinutes)
+    // Idle: when the next rest starts.  Fatigue is the model's input, not
+    // something the user can act on; "in 42m" answers the actual question.
+    if (root.restBreakOnline && root.nextRestAt.length > 0) {
+      var minutes = root.minutesUntilNextRest
+      return minutes <= 0 ? "now" : "in " + formatMinutes(minutes)
+    }
+    // No prediction (rest-break offline): fall back to time since the last
+    // rest, the other half of "when do I rest".
+    if (root.sinceRestMinutes >= 1) return formatMinutes(root.sinceRestMinutes) + " ago"
     return ""
   }
 
@@ -186,12 +198,14 @@ BarWidget {
 
   readonly property string restBreakTooltip: {
     if (!root.restBreakOnline) return ""
-    var lines = ["Fatigue " + formatMinutes(root.fatigueMinutes)]
-    if (root.workMinutes >= 1) lines.push("Working " + formatMinutes(root.workMinutes))
+    var lines = []
     if (root.nextRestAt.length > 0) {
-      lines.push("Next rest in " + formatMinutes(root.nextRestMinutes) +
-                 " (" + hhmm(root.nextRestAt) + ")")
+      lines.push("Next rest in " + formatMinutes(Math.max(0, root.minutesUntilNextRest)) +
+                 " (" + hhmm(root.nextRestAt) + ")" +
+                 (root.nextRestMinutes > 0 ? " · " + root.nextRestMinutes + "m" : ""))
     }
+    lines.push("Fatigue " + formatMinutes(root.fatigueMinutes))
+    if (root.workMinutes >= 1) lines.push("Working " + formatMinutes(root.workMinutes))
     return lines.join("\n")
   }
 
@@ -415,8 +429,7 @@ BarWidget {
           }
 
           Text {
-            text: root.formatMinutes(root.fatigueMinutes) +
-                  (root.workMinutes >= 1 ? "  ·  worked " + root.formatMinutes(root.workMinutes) : "")
+            text: root.formatMinutes(root.fatigueMinutes)
             color: Commons.Color.popups.text
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.body
@@ -424,7 +437,7 @@ BarWidget {
 
           Text {
             width: Style.space(84)
-            text: "NEXT REST"
+            text: "LAST REST"
             color: Commons.Color.popups.text
             opacity: 0.55
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -433,9 +446,32 @@ BarWidget {
           }
 
           Text {
-            text: root.nextRestAt.length > 0
-              ? "in " + root.formatMinutes(root.nextRestMinutes) + "  ·  " + root.hhmm(root.nextRestAt)
-              : "not scheduled"
+            text: root.sinceRestMinutes >= 1
+              ? root.formatMinutes(root.sinceRestMinutes) + " ago"
+              : "—"
+            color: Commons.Color.popups.text
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            width: Style.space(84)
+            text: root.locked ? "RESTING" : "NEXT REST"
+            color: Commons.Color.popups.text
+            opacity: 0.55
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1.2
+          }
+
+          Text {
+            text: root.locked
+              ? "ends " + root.hhmm(root.unlockAt)
+              : root.nextRestAt.length > 0
+                ? "in " + root.formatMinutes(Math.max(0, root.minutesUntilNextRest)) +
+                  "  ·  " + root.hhmm(root.nextRestAt) +
+                  (root.nextRestMinutes > 0 ? "  ·  " + root.nextRestMinutes + "m" : "")
+                : "not scheduled"
             color: Commons.Color.popups.text
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.body

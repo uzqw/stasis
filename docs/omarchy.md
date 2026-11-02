@@ -139,11 +139,13 @@ stasis status
 - 锁定期间 bar 只显示倒计时；键鼠已被抓取，点击无效是预期行为。
 - 失败时图标变 urgent 色，悬停提示查看 `stasis status`。
 - 面板底部提示提前解锁手势：连按 3 次 `j`，再输入密码回车。
-- 空闲时 bar 显示**疲劳分钟**（模型用来判断何时休息的量，如 `42m`），
-  面板显示 `FATIGUE` / `NEXT REST`；没有 rest-break 数据时只显示图标。
-- 工作时长（距上次休息结束）放在悬停提示里：`Fatigue 42m` /
-  `Working 1h12m` / `Next rest in 10m (11:24)`。工作时长优先用 status 文件的
-  `lastRestEnd` 计算，没有休息记录时回退到 rest-break 的 3 小时窗口值。
+- 空闲时 bar 显示**距下次休息还有多久**（如 `in 42m`，到期显示 `now`），
+  直接回答“什么时候休息”；面板显示 `FATIGUE` / `LAST REST` /
+  `NEXT REST`（含预测时间与休息时长）。没有 rest-break 预测时回退为
+  “距上次休息多久”（如 `1h37m ago`）。
+- 悬停提示：`Next rest in 42m (14:43) · 15m` / `Fatigue 97m` /
+  `Working 1h37m`。工作时长优先用 status 文件的 `lastRestEnd` 计算，没有
+  休息记录时回退到 rest-break 的 3 小时窗口值。
 - 插件设置：`binary`（默认 `~/.local/bin/stasis`）、`durations`
   （逗号分隔）、`statusFile`（默认见上）、`restBreakStatusFile`
   （可选，默认自动探测）。
