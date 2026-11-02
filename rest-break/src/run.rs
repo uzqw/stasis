@@ -335,7 +335,14 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
     let now = Utc::now();
     // 事件源会话是休息事实的唯一活来源。--check 在 aide 端点未部署时仍可
     // 只看 AW；调度路径 fail-closed 而不退回计划 history。
-    let sessions_result = fetch_rest_sessions(env);
+    // Aide's endpoint is authoritative when it exists.  `--check` is the
+    // display path and must work without it, so fall back to the event store
+    // Stasis writes: without sessions a locked rest scores as plain AFK.
+    let sessions_result = match fetch_rest_sessions(env) {
+        Ok(sessions) => Ok(sessions),
+        Err(_) if check_only => Ok(crate::events::read_sessions(&crate::events::events_dir())),
+        Err(e) => Err(e),
+    };
     let (mut result, mut fatigue, mut until) = (decision(now, "", 0.0, 0), 0.0, None);
     if let Err(e) = &sessions_result
         && !check_only

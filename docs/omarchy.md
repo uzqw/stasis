@@ -199,14 +199,15 @@ rest-break/aide 用别的目录，在 `config.json` 的 `events_dir` 显式对�
 bar 空闲时显示的 `1h12m` 在回退路径上来自 rest-break：
 
 ```text
-stasis afk ──evdev 只读──► aw-server(-rust) :5600 ──► rest-break --check
-                                                          │
+stasis afk ──evdev 只读──► aw-server(-rust) :5600 ──┐
+                                                    ├─► rest-break --check
+stasis daemon ──rest.locked/unlocked──► events/ ────┘         │
                                         ~/.local/state/rest-break/status.json
-                                                          │
-                                    ┌─────────────────────┴──────────────┐
-                                bar widget                        stasis autorest
-                                                                        │
-                                              rest.requested ──► stasis daemon ──► 锁定
+                                                              │
+                                    ┌─────────────────────────┴──────────────┐
+                                bar widget                            stasis autorest
+                                                                           │
+                                                 rest.requested ──► stasis daemon ──► 锁定
 ```
 
 `stasis autorest` 是补齐调度的一环：本机 aide 只暴露 `get_locker_plan` /
@@ -223,8 +224,15 @@ stasis afk ──evdev 只读──► aw-server(-rust) :5600 ──► rest-bre
   aw-server-rust 可用 AUR `aw-server-rust-git`，或
   `git clone https://github.com/ActivityWatch/aw-server-rust && cargo build --release`
   后把 `target/release/aw-server` 装成 `~/.local/bin/aw-server-rust`。
-- `rest-break --check` 只读 ActivityWatch、不经过 aide，因此只刷新状态文件，
-  不会安排休息；用 `rest-break-check.timer` 每分钟跑一次。
+- `rest-break --check` 读 ActivityWatch，并直接从 Stasis 事件目录
+  （`STASIS_EVENTS_DIR`，默认 `~/.local/share/stasis/events`）读
+  `rest.locked` / `rest.unlocked`，把真实锁定区间当成休息会话。它不经过
+  aide，因此只刷新状态文件，不会安排休息；`rest-break-check.timer` 每分钟
+  跑一次。
+- 疲劳模型对普通 AFK 按 0.5 倍恢复，对锁定休息按 6 倍恢复。之前 `--check`
+  拿不到会话，休息只能算普通 AFK，短于 AFK 超时（180 秒）的休息甚至会被
+  当成工作；现在按锁定区间计算，休息结束后的 15 分钟冷却也会生效
+  （`rest_cooldown_until`）。
 - 安装：`./omarchy/install.sh --with-afk` 会构建并启用 `stasis-afk.service`
   和 `rest-break-check.timer`。ActivityWatch 服务本身需自行安装，本仓库
   不附带第三方单元。
