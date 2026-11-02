@@ -362,20 +362,28 @@ pub fn evaluate_with_freshness(
     if sessions.is_some() {
         intervals = overlay(&intervals, &rests);
     }
+    // aw-watcher 在状态切换时会把上一条事件再开一个 pulsetime（默认约
+    // 185 秒），于是新旧事件必然重叠一到三分钟。按切换时刻截断即可；只有
+    // 超过这个量级的重叠才当成真实数据冲突（两个 watcher 互相打架）。
+    const MAX_HEARTBEAT_OVERLAP: Duration = Duration::seconds(300);
     let mut merged: Vec<Interval> = Vec::new();
     for iv in intervals {
+        let mut drop_prev = false;
         if let Some(prev) = merged.last_mut()
             && iv.start < prev.end
         {
-            if iv.status != prev.status {
-                if prev.end - iv.start > Duration::seconds(5) {
-                    return skip(&merged, &rests, "conflicting_overlap");
-                }
-                prev.end = iv.start;
-            } else {
+            if iv.status == prev.status {
                 prev.end = prev.end.max(iv.end);
                 continue;
             }
+            if prev.end - iv.start > MAX_HEARTBEAT_OVERLAP {
+                return skip(&merged, &rests, "conflicting_overlap");
+            }
+            prev.end = iv.start;
+            drop_prev = prev.end <= prev.start;
+        }
+        if drop_prev {
+            merged.pop();
         }
         merged.push(iv);
     }

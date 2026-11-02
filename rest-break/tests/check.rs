@@ -331,6 +331,17 @@ fn sort_and_overlaps() {
     );
 }
 #[test]
+fn heartbeat_pulsetime_overlap_is_trimmed() {
+    // aw-watcher 切换状态时会把上一条事件多开一个 pulsetime，导致相邻状态
+    // 重叠数分钟。按切换时刻截断，而不是让整份快照冻结在上一分钟。
+    result(
+        &[e(-100.0, -3.0), afk(-6.0, -4.0), e(-4.0, 0.0)],
+        "",
+        98.0,
+        15,
+    );
+}
+#[test]
 fn subsecond_jitter_overlap_tolerated() {
     let mut work = e(-100.0, 0.0);
     work.duration = 76.0 * 60.0 + 13.0;
