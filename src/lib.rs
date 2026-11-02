@@ -3,6 +3,7 @@ pub mod autorest;
 mod cjk_font;
 pub mod config;
 pub mod engine;
+pub mod idle;
 pub mod keymap;
 pub mod keypad;
 pub mod platform;

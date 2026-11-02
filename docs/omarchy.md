@@ -165,6 +165,27 @@ stasis status
   `state=error`，bar 只是不显示工作时长，**不影响** `stasis rest N` 与
   锁定/解锁。
 
+## 休息期间保持屏幕
+
+锁定会 grab evdev，合成器收不到输入，它自己的 idle 计时器照常触发：屏幕变黑、
+锁屏界面盖住倒计时。`keepawake` 只走 freedesktop D-Bus ScreenSaver 和 logind，
+Quickshell 两者都不看，所以在 Omarchy 上照样黑屏。
+
+现在 daemon 在锁定期间创建 Omarchy shell 的 stay-awake 标记
+（`~/.local/state/omarchy/indicators/stay-awake`），解锁时删除：
+
+- shell 监听该目录，文件一出现就记录 `stay-awake: enabled state-file` 并取消
+  正在进行的 idle cycle，屏保和锁屏都不会启动。
+- 文件属于用户：只有 Stasis 自己创建时才删除；归属记录在
+  `~/.local/state/stasis/stay-awake-owned`，daemon 崩溃后下次启动会清理，
+  不会永久保持唤醒。
+- 用户自己开的 stay-awake 不受影响（文件已存在时不接管）。
+- 其他 Wayland 桌面没有这个约定，仍只有 `keepawake` 的 D-Bus/logind inhibit。
+
+2026-11-02 真机验证：1 分钟休息期间 shell 日志出现
+`stay-awake: enabled state-file` / `idle-cycle-cancel`，解锁时刻出现
+`stay-awake: disabled state-file`，标记与 sentinel 都被删除。
+
 ## 与 rest-break 的关系
 
 两者共用事件目录：rest-break 通过 aide 写 `rest.requested`，Stasis 投影后

@@ -258,6 +258,9 @@ Omarchy 用 Hyprland + Quickshell。锁定后端不变（evdev 抓取发生在�
   5 秒视为进程已退出；进程被信号终止时不保证写 `running=false`。
 - **CLI**：`stasis rest N` 写 `rest.requested` 事件（与 aide 同一协议），`stasis lock/unlock`
   走既有 command-file 协议。解锁仍然只认密码手势，状态文件与 bar 都不能绕过它。
+- **stay-awake 标记**：锁定期间创建 Omarchy shell 的
+  `~/.local/state/omarchy/indicators/stay-awake`，解锁时删除；否则合成器看不到输入，
+  会在休息中途黑屏并盖住倒计时。归属记录在 Stasis 状态目录，只删除自己创建的文件。
 
 实现与限制见 [omarchy.md](omarchy.md)。
 

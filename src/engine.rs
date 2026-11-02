@@ -165,10 +165,19 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     #[cfg(target_os = "windows")]
     let mut armed_at: Option<Instant> = None;
 
+    let mut stay_awake = crate::idle::StayAwake::new();
+
     loop {
         if last_status.is_none_or(|t| t.elapsed() >= STATUS_INTERVAL) {
             last_status = Some(Instant::now());
-            publish_status(&snapshot, &controller, &events_dir, Utc::now(), true);
+            publish_status(
+                &snapshot,
+                &controller,
+                &events_dir,
+                Utc::now(),
+                true,
+                &mut stay_awake,
+            );
         }
 
         // Determine which channels to select on this iteration.
@@ -459,7 +468,14 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
     update(&snapshot, |s| {
         s.locked = false;
     });
-    publish_status(&snapshot, &controller, &events_dir, Utc::now(), false);
+    publish_status(
+        &snapshot,
+        &controller,
+        &events_dir,
+        Utc::now(),
+        false,
+        &mut stay_awake,
+    );
 }
 
 /// Write the runtime snapshot external UIs (Omarchy bar widget) read.
@@ -473,12 +489,16 @@ fn publish_status(
     events_dir: &Path,
     now: DateTime<Utc>,
     running: bool,
+    stay_awake: &mut crate::idle::StayAwake,
 ) {
     let snap = match snapshot.lock() {
         Ok(s) => s.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     };
     let sessions = controller.sessions(now);
+    // A locked rest must not trip the desktop's own idle chain: the screen
+    // would blank and hide the countdown.
+    stay_awake.sync(running && snap.locked);
     let session = sessions
         .values()
         .filter(|s| matches!(s.phase, Phase::Active | Phase::Waiting) && now < s.unlock_at)
