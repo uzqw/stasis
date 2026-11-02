@@ -41,8 +41,9 @@ the `stasis.service` user unit for it.
 The panel shows a warning colour when the last attempt failed; run
 `stasis status` for the engine's message.
 
-When `rest-break` is deployed, the bar also shows the current work stretch
-(e.g. `1h12m`) while idle and the panel adds `WORKING` / `NEXT REST` rows.
+When `rest-break` is deployed, the bar shows fatigue (e.g. `42m`) while idle,
+because fatigue is what decides the next rest. The tooltip adds work time and
+the predicted next rest; the panel has `FATIGUE` / `NEXT REST` rows.
 That data comes from rest-break's `status.json` (ActivityWatch-backed) and is
 purely informational: it does not affect starting or ending a rest.
 

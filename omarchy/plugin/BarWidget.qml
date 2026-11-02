@@ -164,9 +164,9 @@ BarWidget {
   readonly property string label: {
     if (root.online && root.locked) return clockText(remainingSeconds)
     if (root.starting) return "…"
-    // Idle: how long the current work stretch is.  Falls back to rest-break's
-    // rolling window when no rest is on record (or the daemon is down).
-    if (root.workMinutes >= 1) return formatMinutes(root.workMinutes)
+    // Idle: fatigue is what decides the next rest, so that is the number the
+    // bar shows.  Work time is context and lives in the tooltip.
+    if (root.restBreakOnline && root.fatigueMinutes >= 1) return formatMinutes(root.fatigueMinutes)
     return ""
   }
 
@@ -186,11 +186,8 @@ BarWidget {
 
   readonly property string restBreakTooltip: {
     if (!root.restBreakOnline) return ""
-    var lines = ["Working " + formatMinutes(root.workMinutes) +
-                 " · fatigue " + formatMinutes(root.fatigueMinutes)]
-    if (root.sinceRestMinutes > 0 && root.restBreakOnline) {
-      lines.push("rest-break window: " + formatMinutes(root.restBreakWorkMinutes))
-    }
+    var lines = ["Fatigue " + formatMinutes(root.fatigueMinutes)]
+    if (root.workMinutes >= 1) lines.push("Working " + formatMinutes(root.workMinutes))
     if (root.nextRestAt.length > 0) {
       lines.push("Next rest in " + formatMinutes(root.nextRestMinutes) +
                  " (" + hhmm(root.nextRestAt) + ")")
@@ -409,7 +406,7 @@ BarWidget {
 
           Text {
             width: Style.space(84)
-            text: "WORKING"
+            text: "FATIGUE"
             color: Commons.Color.popups.text
             opacity: 0.55
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -418,8 +415,8 @@ BarWidget {
           }
 
           Text {
-            text: root.formatMinutes(root.workMinutes) +
-                  "  ·  fatigue " + root.formatMinutes(root.fatigueMinutes)
+            text: root.formatMinutes(root.fatigueMinutes) +
+                  (root.workMinutes >= 1 ? "  ·  worked " + root.formatMinutes(root.workMinutes) : "")
             color: Commons.Color.popups.text
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.body
