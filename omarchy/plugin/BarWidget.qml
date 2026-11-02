@@ -57,10 +57,21 @@ BarWidget {
   property var restBreak: ({})
   property bool restBreakOnline: false
 
-  readonly property double workMinutes: {
+  // rest-break reports work inside a rolling three hour window, so its number
+  // keeps the work done before a rest.  The daemon also records when the last
+  // rest ended; counting from there makes the clock visibly restart after a
+  // rest, which is what "how long have I been working" means to a user.
+  readonly property double sinceRestMinutes: {
+    var iso = String(root.state && root.state.lastRestEnd ? root.state.lastRestEnd : "")
+    var t = Date.parse(iso)
+    if (isNaN(t)) return 0
+    return Math.max(0, (root.nowMs - t) / 60000)
+  }
+  readonly property double restBreakWorkMinutes: {
     var v = Number(root.restBreak ? root.restBreak.workMinutes : NaN)
     return isFinite(v) && v > 0 ? v : 0
   }
+  readonly property double workMinutes: root.sinceRestMinutes > 0 ? root.sinceRestMinutes : root.restBreakWorkMinutes
   readonly property double fatigueMinutes: {
     var v = Number(root.restBreak ? root.restBreak.fatigueMinutes : NaN)
     return isFinite(v) && v > 0 ? v : 0
@@ -153,9 +164,9 @@ BarWidget {
   readonly property string label: {
     if (root.online && root.locked) return clockText(remainingSeconds)
     if (root.starting) return "…"
-    // Idle: how long the current work stretch is.  Shown even when the daemon
-    // is down, because it comes from rest-break, not from stasis.
-    if (root.restBreakOnline && root.workMinutes >= 1) return formatMinutes(root.workMinutes)
+    // Idle: how long the current work stretch is.  Falls back to rest-break's
+    // rolling window when no rest is on record (or the daemon is down).
+    if (root.workMinutes >= 1) return formatMinutes(root.workMinutes)
     return ""
   }
 
@@ -177,6 +188,9 @@ BarWidget {
     if (!root.restBreakOnline) return ""
     var lines = ["Working " + formatMinutes(root.workMinutes) +
                  " · fatigue " + formatMinutes(root.fatigueMinutes)]
+    if (root.sinceRestMinutes > 0 && root.restBreakOnline) {
+      lines.push("rest-break window: " + formatMinutes(root.restBreakWorkMinutes))
+    }
     if (root.nextRestAt.length > 0) {
       lines.push("Next rest in " + formatMinutes(root.nextRestMinutes) +
                  " (" + hhmm(root.nextRestAt) + ")")

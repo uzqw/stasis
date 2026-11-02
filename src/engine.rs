@@ -478,13 +478,13 @@ fn publish_status(
         Ok(s) => s.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     };
-    let session = controller
-        .sessions(now)
-        .into_values()
+    let sessions = controller.sessions(now);
+    let session = sessions
+        .values()
         .filter(|s| matches!(s.phase, Phase::Active | Phase::Waiting) && now < s.unlock_at)
         .min_by_key(|s| (s.phase != Phase::Active, s.lock_at))
         .map(|s| SessionInfo {
-            session_id: s.session_id,
+            session_id: s.session_id.clone(),
             phase: if s.phase == Phase::Active {
                 "active"
             } else {
@@ -504,6 +504,12 @@ fn publish_status(
         session,
         now,
     );
+    status.last_rest_end = sessions
+        .values()
+        .flat_map(|s| s.segments.iter())
+        .filter_map(|seg| seg.unlocked_at)
+        .max()
+        .map(crate::status::iso);
     status.running = running;
     if let Err(e) = status.write(&Config::status_path()) {
         tracing::debug!("status file write failed: {e}");

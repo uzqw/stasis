@@ -51,6 +51,10 @@ pub struct Status {
     pub events_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionInfo>,
+    /// When the most recent rest ended.  The bar counts the current work
+    /// stretch from here, so a rest visibly restarts the clock.
+    #[serde(rename = "lastRestEnd", skip_serializing_if = "Option::is_none")]
+    pub last_rest_end: Option<String>,
 }
 
 impl Status {
@@ -78,6 +82,7 @@ impl Status {
             updated_at: iso(now),
             events_dir: events_dir.display().to_string(),
             session,
+            last_rest_end: None,
         }
     }
 

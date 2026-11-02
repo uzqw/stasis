@@ -125,7 +125,8 @@ stasis status
     "phase": "active",
     "lockAt": "2026-10-31T06:13:30.942Z",
     "unlockAt": "2026-10-31T06:14:30.942Z"
-  }
+  },
+  "lastRestEnd": "2026-10-31T06:14:30.942Z"
 }
 ```
 
@@ -138,14 +139,22 @@ stasis status
 - 锁定期间 bar 只显示倒计时；键鼠已被抓取，点击无效是预期行为。
 - 失败时图标变 urgent 色，悬停提示查看 `stasis status`。
 - 面板底部提示提前解锁手势：连按 3 次 `j`，再输入密码回车。
-- 空闲时若 rest-break 有可用状态，bar 显示当前连续工作时长（如 `1h12m`），
-  面板显示 `WORKING` / `NEXT REST`；没有数据时只显示图标。
+- 空闲时 bar 显示当前连续工作时长（如 `1h12m`），面板显示 `WORKING` /
+  `NEXT REST`；没有数据时只显示图标。时长优先用 status 文件的
+  `lastRestEnd` 计算（距上次休息结束），休息结束后从 0 重新计时；没有休息
+  记录时才回退到 rest-break 的 3 小时滚动窗口值。
 - 插件设置：`binary`（默认 `~/.local/bin/stasis`）、`durations`
   （逗号分隔）、`statusFile`（默认见上）、`restBreakStatusFile`
   （可选，默认自动探测）。
 - IPC：`omarchy-shell stasis.rest open|close|toggle|refresh|rest <N>`。
 
-工作时长来自 rest-break 的 `status.json`，与 Stasis 的锁定状态无关：
+工作时长有两个来源，互不阻塞：
+
+- 主来源是 Stasis 自己的 status 文件：daemon 从事件投影里取最近一次
+  `rest.unlocked` 的 `unlockedAt`，写进 `lastRestEnd`，bar 用它算“距上次
+  休息结束”。这样休息完时长会归零重算，不会把休息前的工作继续累加。
+- 回退来源是 rest-break 的 `status.json`（3 小时滚动窗口内的工作分钟），
+  仅在没有 `lastRestEnd` 时使用。
 
 - 探测顺序：`restBreakStatusFile` → `$XDG_STATE_HOME/rest-break/status.json`
   → `~/stasis/rest-break/status.json` → `~/stasis/rest-break/target/release/status.json`。
@@ -166,7 +175,7 @@ rest-break/aide 用别的目录，在 `config.json` 的 `events_dir` 显式对�
 
 ### 工作时长数据链（可选）
 
-bar 空闲时显示的 `1h12m` 不来自 Stasis，而是：
+bar 空闲时显示的 `1h12m` 在回退路径上来自 rest-break：
 
 ```text
 stasis afk ──evdev 只读──► aw-server(-rust) :5600 ──► rest-break --check
