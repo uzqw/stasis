@@ -205,27 +205,19 @@ impl Default for Recovery {
 }
 
 impl Recovery {
-    /// Config file first, then environment overrides (one-off runs and
-    /// tests), then the built-in defaults.
+    /// The config file is the only source; the constants below are the
+    /// fallback when it is missing or malformed.
     ///
-    /// Config: `$XDG_CONFIG_HOME/rest-break/config.json` (or
-    /// `~/.config/rest-break/config.json`), overridable with
-    /// `REST_BREAK_CONFIG`:
+    /// `$XDG_CONFIG_HOME/rest-break/config.json` (or
+    /// `~/.config/rest-break/config.json`):
     ///
     /// ```json
-    /// {"afkRecovery": 2.0, "lockedRecovery": 6.0}
+    /// {"afkRecovery": 0.2, "lockedRecovery": 6.0}
     /// ```
     pub fn load() -> Self {
-        let mut recovery = config_path()
+        config_path()
             .and_then(|path| read_config(&path))
-            .map_or_else(Self::default, Self::from_file);
-        if let Some(value) = env_value("REST_BREAK_AFK_RECOVERY") {
-            recovery.afk = value;
-        }
-        if let Some(value) = env_value("REST_BREAK_LOCKED_RECOVERY") {
-            recovery.locked = value;
-        }
-        recovery
+            .map_or_else(Self::default, Self::from_file)
     }
 
     fn from_file(config: FileConfig) -> Self {
@@ -256,9 +248,6 @@ struct FileConfig {
 }
 
 fn config_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("REST_BREAK_CONFIG") {
-        return Some(PathBuf::from(path));
-    }
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
@@ -273,13 +262,6 @@ fn read_config(path: &Path) -> Option<FileConfig> {
 /// 0..=12 keeps a typo from erasing the model; anything else uses the default.
 fn sanitize(value: f64) -> Option<f64> {
     (value.is_finite() && (0.0..=12.0).contains(&value)).then_some(value)
-}
-
-fn env_value(name: &str) -> Option<f64> {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .and_then(sanitize)
 }
 
 pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
@@ -306,8 +288,8 @@ pub fn recovery_fatigue_with(iv: Interval, rests: &[Interval], recovery: Recover
         locked += fatigue_seconds(start, end);
     }
     let locked_ratio = locked / fatigue_seconds(iv.start, iv.end);
-    // 普通 AFK 默认 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
-    // 在休息）；锁定区间默认 6 倍。两者都可经环境变量调整。
+    // 普通 AFK 兜底 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
+    // 在休息）；锁定区间兜底 6 倍。实际取值只来自 config.json。
     fatigue_seconds(iv.start, iv.end) * recovery.factor(locked_ratio)
 }
 fn overlay(intervals: &[Interval], rests: &[Interval]) -> Vec<Interval> {

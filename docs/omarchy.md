@@ -237,17 +237,16 @@ stasis daemon ──rest.locked/unlocked──► events/ ────┘       
   拿不到会话，休息只能算普通 AFK，短于 AFK 超时（180 秒）的休息甚至会被
   当成工作；现在按锁定区间计算，休息结束后的 15 分钟冷却也会生效
   （`rest_cooldown_until`）。
-- 两个倍率写在 `~/.config/rest-break/config.json`（`REST_BREAK_CONFIG` 可改
-  路径，`omarchy/install.sh --with-afk` 会用默认值创建）：
+- 两个倍率只从 `~/.config/rest-break/config.json` 读取（`omarchy/install.sh
+  --with-afk` 会创建）：
 
   ```json
-  {"afkRecovery": 0.5, "lockedRecovery": 6.0}
+  {"afkRecovery": 0.2, "lockedRecovery": 6.0}
   ```
 
-  取值范围 0–12，缺省或非法值回退默认；改完下一次 timer 触发即生效。
-  环境变量 `REST_BREAK_AFK_RECOVERY` / `REST_BREAK_LOCKED_RECOVERY` 优先级
-  更高，只用于临时覆盖。2026-09-21 之前 AFK 是 2 倍，用户判定「AFK 不能
-  证明在休息」后降到 0.5。
+  取值范围 0–12，缺省或非法值回退代码兜底值（0.5 / 6）；改完下一次 timer
+  触发即生效，不需要重启。2026-09-21 之前 AFK 是 2 倍，用户判定「AFK 不能
+  证明在休息」后降到 0.5；2026-11-03 部署配置进一步调到 0.2。
 - 安装：`./omarchy/install.sh --with-afk` 会构建并启用 `stasis-afk.service`
   和 `rest-break-check.timer`。ActivityWatch 服务本身需自行安装，本仓库
   不附带第三方单元。
