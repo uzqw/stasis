@@ -8,6 +8,4 @@ After=graphical-session.target
 Type=oneshot
 Environment=STATUS_FILE=%S/rest-break/status.json
 Environment=AW_BASE_URL=http://localhost:5600/api/0
-# Optional user overrides (REST_BREAK_AFK_RECOVERY / REST_BREAK_LOCKED_RECOVERY).
-EnvironmentFile=-%h/.config/rest-break/env
 ExecStart=%h/.local/bin/rest-break --check

@@ -54,6 +54,12 @@ if [ "$with_afk" = 1 ]; then
 
   echo "==> installing AFK publisher + status timer"
   install -Dm644 "$repo_dir/omarchy/stasis-afk.service" "$unit_dir/stasis-afk.service"
+  # Recovery multipliers live in a config file, not in the unit.
+  install -d "$HOME/.config/rest-break"
+  if [ ! -f "$HOME/.config/rest-break/config.json" ]; then
+    printf '{\n  "afkRecovery": 0.5,\n  "lockedRecovery": 6.0\n}\n' \
+      > "$HOME/.config/rest-break/config.json"
+  fi
   install -Dm644 "$repo_dir/omarchy/rest-break-check.service" "$unit_dir/rest-break-check.service"
   install -Dm644 "$repo_dir/omarchy/rest-break-check.timer" "$unit_dir/rest-break-check.timer"
   install -Dm644 "$repo_dir/omarchy/stasis-autorest.service" "$unit_dir/stasis-autorest.service"

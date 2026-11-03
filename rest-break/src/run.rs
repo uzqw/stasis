@@ -354,7 +354,7 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
         match fetch_events(env, now) {
             Err(e) => result = decision(now, format!("error:{e}"), 0.0, 0),
             Ok(events) => {
-                let recovery = Recovery::from_env();
+                let recovery = Recovery::load();
                 match evaluate_observed_with(&events, sessions.as_ref(), &json!([]), now, recovery)
                 {
                     Ok((d, f)) => {

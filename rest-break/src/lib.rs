@@ -4,6 +4,8 @@ pub mod events;
 pub mod run;
 pub mod ui;
 
+use std::path::{Path, PathBuf};
+
 use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -203,26 +205,81 @@ impl Default for Recovery {
 }
 
 impl Recovery {
-    /// `REST_BREAK_AFK_RECOVERY` / `REST_BREAK_LOCKED_RECOVERY`, each clamped
-    /// to 0..=12; malformed values fall back to the default.
-    pub fn from_env() -> Self {
-        let read = |name: &str, default: f64| {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.trim().parse::<f64>().ok())
-                .filter(|v| v.is_finite() && (0.0..=12.0).contains(v))
-                .unwrap_or(default)
-        };
+    /// Config file first, then environment overrides (one-off runs and
+    /// tests), then the built-in defaults.
+    ///
+    /// Config: `$XDG_CONFIG_HOME/rest-break/config.json` (or
+    /// `~/.config/rest-break/config.json`), overridable with
+    /// `REST_BREAK_CONFIG`:
+    ///
+    /// ```json
+    /// {"afkRecovery": 2.0, "lockedRecovery": 6.0}
+    /// ```
+    pub fn load() -> Self {
+        let mut recovery = config_path()
+            .and_then(|path| read_config(&path))
+            .map_or_else(Self::default, Self::from_file);
+        if let Some(value) = env_value("REST_BREAK_AFK_RECOVERY") {
+            recovery.afk = value;
+        }
+        if let Some(value) = env_value("REST_BREAK_LOCKED_RECOVERY") {
+            recovery.locked = value;
+        }
+        recovery
+    }
+
+    fn from_file(config: FileConfig) -> Self {
         let default = Self::default();
         Self {
-            afk: read("REST_BREAK_AFK_RECOVERY", default.afk),
-            locked: read("REST_BREAK_LOCKED_RECOVERY", default.locked),
+            afk: config
+                .afk_recovery
+                .and_then(sanitize)
+                .unwrap_or(default.afk),
+            locked: config
+                .locked_recovery
+                .and_then(sanitize)
+                .unwrap_or(default.locked),
         }
     }
 
     fn factor(&self, locked_ratio: f64) -> f64 {
         self.afk + (self.locked - self.afk) * locked_ratio
     }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct FileConfig {
+    #[serde(default, rename = "afkRecovery")]
+    afk_recovery: Option<f64>,
+    #[serde(default, rename = "lockedRecovery")]
+    locked_recovery: Option<f64>,
+}
+
+fn config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("REST_BREAK_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|base| base.join("rest-break").join("config.json"))
+}
+
+fn read_config(path: &Path) -> Option<FileConfig> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// 0..=12 keeps a typo from erasing the model; anything else uses the default.
+fn sanitize(value: f64) -> Option<f64> {
+    (value.is_finite() && (0.0..=12.0).contains(&value)).then_some(value)
+}
+
+fn env_value(name: &str) -> Option<f64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .and_then(sanitize)
 }
 
 pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
@@ -739,4 +796,49 @@ pub fn prune_expired(plan: Vec<Value>, now: Time) -> Vec<Value> {
                 .is_some_and(|t| t <= now)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn write(dir: &Path, body: &str) -> PathBuf {
+        let path = dir.join("config.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn reads_multipliers_from_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), r#"{"afkRecovery": 2, "lockedRecovery": 4.5}"#);
+        let recovery = Recovery::from_file(read_config(&path).unwrap());
+        assert_eq!(recovery.afk, 2.0);
+        assert_eq!(recovery.locked, 4.5);
+    }
+
+    #[test]
+    fn missing_or_invalid_values_fall_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), r#"{"afkRecovery": 99, "lockedRecovery": -1}"#);
+        let recovery = Recovery::from_file(read_config(&path).unwrap());
+        assert_eq!(recovery, Recovery::default());
+    }
+
+    #[test]
+    fn partial_config_keeps_the_other_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), r#"{"afkRecovery": 1.5}"#);
+        let recovery = Recovery::from_file(read_config(&path).unwrap());
+        assert_eq!(recovery.afk, 1.5);
+        assert_eq!(recovery.locked, Recovery::default().locked);
+    }
+
+    #[test]
+    fn malformed_or_missing_config_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "not json");
+        assert!(read_config(&path).is_none());
+        assert!(read_config(&dir.path().join("absent.json")).is_none());
+    }
 }
