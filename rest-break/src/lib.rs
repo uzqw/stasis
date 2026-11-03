@@ -182,7 +182,54 @@ pub fn observed_rest_intervals(
     }
     Ok((rests, until))
 }
+/// Recovery multipliers, in fatigue-minutes per clock-minute.
+///
+/// Plain AFK is weak evidence (the user may be reading or in a meeting), so
+/// it recovers less than a locked rest.  Both are configurable because the
+/// "right" value is a judgement call, not a measurement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Recovery {
+    pub afk: f64,
+    pub locked: f64,
+}
+
+impl Default for Recovery {
+    fn default() -> Self {
+        Self {
+            afk: 0.5,
+            locked: 6.0,
+        }
+    }
+}
+
+impl Recovery {
+    /// `REST_BREAK_AFK_RECOVERY` / `REST_BREAK_LOCKED_RECOVERY`, each clamped
+    /// to 0..=12; malformed values fall back to the default.
+    pub fn from_env() -> Self {
+        let read = |name: &str, default: f64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite() && (0.0..=12.0).contains(v))
+                .unwrap_or(default)
+        };
+        let default = Self::default();
+        Self {
+            afk: read("REST_BREAK_AFK_RECOVERY", default.afk),
+            locked: read("REST_BREAK_LOCKED_RECOVERY", default.locked),
+        }
+    }
+
+    fn factor(&self, locked_ratio: f64) -> f64 {
+        self.afk + (self.locked - self.afk) * locked_ratio
+    }
+}
+
 pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
+    recovery_fatigue_with(iv, rests, Recovery::default())
+}
+
+pub fn recovery_fatigue_with(iv: Interval, rests: &[Interval], recovery: Recovery) -> f64 {
     let mut overlaps: Vec<_> = rests
         .iter()
         .filter_map(|r| {
@@ -202,9 +249,9 @@ pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
         locked += fatigue_seconds(start, end);
     }
     let locked_ratio = locked / fatigue_seconds(iv.start, iv.end);
-    // 普通 AFK 恢复 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
-    // 在休息）；锁定区间 6 倍 → 系数 = 0.5 + 5.5×锁定覆盖率。
-    fatigue_seconds(iv.start, iv.end) * (0.5 + 5.5 * locked_ratio)
+    // 普通 AFK 默认 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
+    // 在休息）；锁定区间默认 6 倍。两者都可经环境变量调整。
+    fatigue_seconds(iv.start, iv.end) * recovery.factor(locked_ratio)
 }
 fn overlay(intervals: &[Interval], rests: &[Interval]) -> Vec<Interval> {
     if rests.is_empty() {
@@ -271,7 +318,25 @@ pub fn evaluate_observed(
     history: &Value,
     now: Time,
 ) -> Result<(Decision, f64), String> {
-    evaluate_with_freshness(events, sessions, history, now, Duration::minutes(5))
+    evaluate_observed_with(events, sessions, history, now, Recovery::default())
+}
+
+/// Same as [`evaluate_observed`] with explicit recovery multipliers.
+pub fn evaluate_observed_with(
+    events: &[Event],
+    sessions: Option<&Value>,
+    history: &Value,
+    now: Time,
+    recovery: Recovery,
+) -> Result<(Decision, f64), String> {
+    evaluate_with_freshness_and(
+        events,
+        sessions,
+        history,
+        now,
+        Duration::minutes(5),
+        recovery,
+    )
 }
 
 pub fn evaluate_with_freshness(
@@ -280,6 +345,24 @@ pub fn evaluate_with_freshness(
     history: &Value,
     now: Time,
     freshness: Duration,
+) -> Result<(Decision, f64), String> {
+    evaluate_with_freshness_and(
+        events,
+        sessions,
+        history,
+        now,
+        freshness,
+        Recovery::default(),
+    )
+}
+
+pub fn evaluate_with_freshness_and(
+    events: &[Event],
+    sessions: Option<&Value>,
+    history: &Value,
+    now: Time,
+    freshness: Duration,
+    recovery: Recovery,
 ) -> Result<(Decision, f64), String> {
     let (rests, until) = match sessions {
         Some(s) => observed_rest_intervals(s, now)?,
@@ -295,7 +378,7 @@ pub fn evaluate_with_freshness(
         let (mut work, mut fatigue) = (0.0, 0.0);
         for iv in intervals {
             if iv.status == "afk" {
-                fatigue = (fatigue - recovery_fatigue(*iv, rests)).max(0.0);
+                fatigue = (fatigue - recovery_fatigue_with(*iv, rests, recovery)).max(0.0);
             } else {
                 work += seconds(iv.end - iv.start);
                 fatigue += fatigue_seconds(iv.start, iv.end);
@@ -407,7 +490,7 @@ pub fn evaluate_with_freshness(
         covered += seconds(iv.end - iv.start);
         if iv.status == "afk" {
             baseline = true;
-            fatigue = (fatigue - recovery_fatigue(*iv, &rests)).max(0.0);
+            fatigue = (fatigue - recovery_fatigue_with(*iv, &rests, recovery)).max(0.0);
         } else {
             work += seconds(iv.end - iv.start);
             fatigue += fatigue_seconds(iv.start, iv.end);

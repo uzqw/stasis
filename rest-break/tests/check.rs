@@ -331,6 +331,25 @@ fn sort_and_overlaps() {
     );
 }
 #[test]
+fn afk_recovery_multiplier_is_configurable() {
+    // 100 分钟工作 + 20 分钟普通 AFK（不在锁定休息里）。
+    let events = [e(-120.0, -40.0), afk(-40.0, -20.0), e(-20.0, 0.0)];
+    let (_, default_fatigue) = evaluate_observed(&events, None, &json!([]), now()).unwrap();
+    close(default_fatigue / 60.0, 90.0);
+    let (_, doubled) = evaluate_observed_with(
+        &events,
+        None,
+        &json!([]),
+        now(),
+        Recovery {
+            afk: 2.0,
+            locked: 6.0,
+        },
+    )
+    .unwrap();
+    close(doubled / 60.0, 60.0);
+}
+#[test]
 fn heartbeat_pulsetime_overlap_is_trimmed() {
     // aw-watcher 切换状态时会把上一条事件多开一个 pulsetime，导致相邻状态
     // 重叠数分钟。按切换时刻截断，而不是让整份快照冻结在上一分钟。
