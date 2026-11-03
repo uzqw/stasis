@@ -247,10 +247,6 @@ fn cli_autorest(args: &[String]) -> i32 {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    let cooldown = value("--cooldown")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(30)
-        .clamp(1, 24 * 60);
     let status_path = value("--status")
         .map(PathBuf::from)
         .unwrap_or_else(default_rest_break_status);
@@ -274,16 +270,7 @@ fn cli_autorest(args: &[String]) -> i32 {
                 .is_some_and(|x| x.phase == "waiting" || x.phase == "active")
     });
 
-    let cfg = Config::load().unwrap_or_default();
-    let store = EventStore::new(cfg.effective_events_dir());
-    let last = stasis::autorest::newest_result(&store.results_dir());
-    let decision = stasis::autorest::decide(
-        &snapshot,
-        locked,
-        last,
-        SystemTime::now(),
-        Duration::from_secs(cooldown * 60),
-    );
+    let decision = stasis::autorest::decide(&snapshot, locked, SystemTime::now());
     match decision {
         Some(d) => match emit_rest(d.minutes, "rest-break", &d.reason) {
             Ok(id) => {

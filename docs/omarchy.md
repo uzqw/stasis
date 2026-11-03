@@ -217,9 +217,10 @@ stasis daemon ──rest.locked/unlocked──► events/ ────┘       
 `stasis autorest` 是补齐调度的一环：本机 aide 只暴露 `get_locker_plan` /
 `set_locker_plan`，没有 rest-break 调用的 `request_rest` / `get_rest_sessions`，
 所以 rest-break 的调度路径在这里会失败。`autorest` 不改模型，只读 rest-break
-已经写好的 `due` / `restMinutes`，检查 daemon 存活、没有进行中的休息、距上次
-休息超过冷却（默认 30 分钟），然后写一条与 `stasis rest` 相同的
-`rest.requested`。`stasis-autorest.timer` 每分钟跑一次。
+已经写好的 `due` / `restMinutes`，检查 daemon 存活、没有进行中的休息、
+rest-break 的 `cooldownUntil`（休息结束后 15 分钟）已过，然后写一条与
+`stasis rest` 相同的 `rest.requested`。冷却只认 rest-break 的字段，bar 的
+“now”和实际锁定因此不会互相矛盾。`stasis-autorest.timer` 每分钟跑一次。
 
 - 为什么不用官方 `aw-watcher-afk`：它用 pynput 读 X11，Hyprland 下看不到
   输入，会一直报「活跃」。`stasis afk` 读同一批 evdev 设备，不需要抓取，
