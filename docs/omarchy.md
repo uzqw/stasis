@@ -241,12 +241,16 @@ stasis daemon ──rest.locked/unlocked──► events/ ────┘       
   --with-afk` 会创建）：
 
   ```json
-  {"afkRecovery": 0.2, "lockedRecovery": 6.0}
+  {"afkRecovery": 0.2, "lockedRecovery": 6.0, "afkMinMinutes": 5}
   ```
 
-  取值范围 0–12，缺省或非法值回退代码兜底值（0.5 / 6）；改完下一次 timer
-  触发即生效，不需要重启。2026-09-21 之前 AFK 是 2 倍，用户判定「AFK 不能
-  证明在休息」后降到 0.5；2026-11-03 部署配置进一步调到 0.2。
+  两个倍率取值范围 0–12，缺省或非法值回退代码兜底值（0.5 / 6）；改完下一次
+  timer 触发即生效，不需要重启。2026-09-21 之前 AFK 是 2 倍，用户判定「AFK
+  不能证明在休息」后降到 0.5；2026-11-03 部署配置进一步调到 0.2。
+
+  `afkMinMinutes`（默认 5，范围 0–180）是**非锁屏** AFK 的最短有效时长：
+  短于它的 AFK 完全不抵扣疲劳（倒水、看条消息不算休息），达到或超过才按
+  `afkRecovery` 倍率恢复。锁定休息不受这个阈值限制。
 - 安装：`./omarchy/install.sh --with-afk` 会构建并启用 `stasis-afk.service`
   和 `rest-break-check.timer`。ActivityWatch 服务本身需自行安装，本仓库
   不附带第三方单元。

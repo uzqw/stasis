@@ -193,6 +193,9 @@ pub fn observed_rest_intervals(
 pub struct Recovery {
     pub afk: f64,
     pub locked: f64,
+    /// Minimum contiguous AFK stretch outside a locked rest that counts as
+    /// recovery at all.  A two minute AFK is a coffee refill, not a rest.
+    pub afk_min_minutes: f64,
 }
 
 impl Default for Recovery {
@@ -200,6 +203,7 @@ impl Default for Recovery {
         Self {
             afk: 0.5,
             locked: 6.0,
+            afk_min_minutes: 5.0,
         }
     }
 }
@@ -231,6 +235,10 @@ impl Recovery {
                 .locked_recovery
                 .and_then(sanitize)
                 .unwrap_or(default.locked),
+            afk_min_minutes: config
+                .afk_min_minutes
+                .and_then(sanitize_minutes)
+                .unwrap_or(default.afk_min_minutes),
         }
     }
 
@@ -245,6 +253,8 @@ struct FileConfig {
     afk_recovery: Option<f64>,
     #[serde(default, rename = "lockedRecovery")]
     locked_recovery: Option<f64>,
+    #[serde(default, rename = "afkMinMinutes")]
+    afk_min_minutes: Option<f64>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -262,6 +272,11 @@ fn read_config(path: &Path) -> Option<FileConfig> {
 /// 0..=12 keeps a typo from erasing the model; anything else uses the default.
 fn sanitize(value: f64) -> Option<f64> {
     (value.is_finite() && (0.0..=12.0).contains(&value)).then_some(value)
+}
+
+/// 0..=180 minutes; 0 disables the minimum (any AFK recovers).
+fn sanitize_minutes(value: f64) -> Option<f64> {
+    (value.is_finite() && (0.0..=180.0).contains(&value)).then_some(value)
 }
 
 pub fn recovery_fatigue(iv: Interval, rests: &[Interval]) -> f64 {
@@ -287,10 +302,16 @@ pub fn recovery_fatigue_with(iv: Interval, rests: &[Interval], recovery: Recover
         }
         locked += fatigue_seconds(start, end);
     }
-    let locked_ratio = locked / fatigue_seconds(iv.start, iv.end);
+    let total = fatigue_seconds(iv.start, iv.end);
+    let locked_ratio = if total > 0.0 { locked / total } else { 0.0 };
+    // 非锁屏的 AFK 只有持续够久才算休息：倒杯水、看条消息不该抵掉疲劳。
+    // 锁定区间不受这个阈值限制（那是确定的休息）。
+    if locked <= 0.0 && seconds(iv.end - iv.start) < recovery.afk_min_minutes * 60.0 {
+        return 0.0;
+    }
     // 普通 AFK 兜底 0.5 倍（2026-09-21 用户判定 2 倍与事实不符：AFK 不能证明
     // 在休息）；锁定区间兜底 6 倍。实际取值只来自 config.json。
-    fatigue_seconds(iv.start, iv.end) * recovery.factor(locked_ratio)
+    total * recovery.factor(locked_ratio)
 }
 fn overlay(intervals: &[Interval], rests: &[Interval]) -> Vec<Interval> {
     if rests.is_empty() {
@@ -814,6 +835,20 @@ mod config_tests {
         let recovery = Recovery::from_file(read_config(&path).unwrap());
         assert_eq!(recovery.afk, 1.5);
         assert_eq!(recovery.locked, Recovery::default().locked);
+    }
+
+    #[test]
+    fn reads_the_afk_minimum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), r#"{"afkMinMinutes": 12}"#);
+        let recovery = Recovery::from_file(read_config(&path).unwrap());
+        assert_eq!(recovery.afk_min_minutes, 12.0);
+        let path = write(dir.path(), r#"{"afkMinMinutes": 999}"#);
+        let recovery = Recovery::from_file(read_config(&path).unwrap());
+        assert_eq!(
+            recovery.afk_min_minutes,
+            Recovery::default().afk_min_minutes
+        );
     }
 
     #[test]

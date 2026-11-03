@@ -331,6 +331,35 @@ fn sort_and_overlaps() {
     );
 }
 #[test]
+fn short_afk_does_not_recover() {
+    // 100 分钟工作 + 4 分钟 AFK：低于默认 5 分钟阈值，完全不抵扣疲劳。
+    let events = [e(-104.0, -4.0), afk(-4.0, 0.0)];
+    let (d, fatigue) = evaluate(&events, &json!([]), now()).unwrap();
+    close(fatigue / 60.0, 100.0);
+    assert_eq!(d.reason, "currently_afk");
+    // 把阈值调到 3 分钟后，同样的 4 分钟 AFK 按 0.5 倍恢复 2 分钟。
+    let (_, recovered) = evaluate_observed_with(
+        &events,
+        None,
+        &json!([]),
+        now(),
+        Recovery {
+            afk_min_minutes: 3.0,
+            ..Recovery::default()
+        },
+    )
+    .unwrap();
+    close(recovered / 60.0, 98.0);
+}
+
+#[test]
+fn long_afk_still_recovers() {
+    // 100 分钟工作 + 6 分钟 AFK（>= 默认阈值）→ 恢复 3 分钟疲劳。
+    let (_, fatigue) = evaluate(&[e(-106.0, -6.0), afk(-6.0, 0.0)], &json!([]), now()).unwrap();
+    close(fatigue / 60.0, 97.0);
+}
+
+#[test]
 fn afk_recovery_multiplier_is_configurable() {
     // 100 分钟工作 + 20 分钟普通 AFK（不在锁定休息里）。
     let events = [e(-120.0, -40.0), afk(-40.0, -20.0), e(-20.0, 0.0)];
@@ -344,6 +373,7 @@ fn afk_recovery_multiplier_is_configurable() {
         Recovery {
             afk: 2.0,
             locked: 6.0,
+            ..Recovery::default()
         },
     )
     .unwrap();
@@ -527,7 +557,12 @@ fn afk_plan_overlap_chaos() {
         // 与实现同式：total×(0.5+5.5×ratio)，ratio = 覆盖分钟/总分钟。
         let dur = (e - s) as f64;
         let cv = covered.iter().filter(|v| **v).count() as f64;
-        let want = dur * (0.5 + 5.5 * cv / dur);
+        // 无锁定覆盖且短于默认 5 分钟阈值的 AFK 不恢复。
+        let want = if cv == 0.0 && dur < 5.0 {
+            0.0
+        } else {
+            dur * (0.5 + 5.5 * cv / dur)
+        };
         close(recovery_fatigue(iv(s, e), &rests) / 60.0, want);
     }
 }
