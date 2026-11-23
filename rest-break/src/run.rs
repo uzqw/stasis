@@ -243,15 +243,31 @@ fn session_key(s: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// Whether a session is still in flight at `now`.
+///
+/// A `waiting` session whose `unlockAt` has passed (or is missing) can no
+/// longer lock, so treating it as in-flight would wedge scheduling forever if
+/// its `rest.expired` was never written or its results were pruned.
+fn is_in_flight(session: &Value, now: Time) -> bool {
+    if !matches!(session["phase"].as_str(), Some("waiting" | "active")) {
+        return false;
+    }
+    match session["unlockAt"]
+        .as_str()
+        .and_then(|s| parse_time(s).ok())
+    {
+        Some(unlock_at) => now < unlock_at,
+        None => session["phase"].as_str() == Some("active"),
+    }
+}
+
 /// 提交不可变 rest.requested 事件。请求不是 history：只有 InputLocker 的
 /// 结果事件能产生恢复额度。
 pub fn execute_rest_request(env: &Env, result: &Decision) -> Result<Time, String> {
     // Preflight has no submission side effects, so failure must not create pending.
     let sessions = fetch_rest_sessions(env).map_err(|e| format!("读取休息会话失败: {e}"))?;
-    if sessions
-        .iter()
-        .any(|s| matches!(s["phase"].as_str(), Some("waiting" | "active")))
-    {
+    let now = Utc::now();
+    if sessions.iter().any(|s| is_in_flight(s, now)) {
         return Err("已有未结束休息会话".into());
     }
     let started = Utc::now();
@@ -340,7 +356,10 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
     // Stasis writes: without sessions a locked rest scores as plain AFK.
     let sessions_result = match fetch_rest_sessions(env) {
         Ok(sessions) => Ok(sessions),
-        Err(_) if check_only => Ok(crate::events::read_sessions(&crate::events::events_dir())),
+        Err(_) if check_only => Ok(crate::events::read_sessions(
+            &crate::events::events_dir(),
+            now,
+        )),
         Err(e) => Err(e),
     };
     let (mut result, mut fatigue, mut until) = (decision(now, "", 0.0, 0), 0.0, None);
@@ -378,7 +397,13 @@ pub fn run_with(env: &Env, args: &[String], stdout: &mut dyn Write, stderr: &mut
         && let Ok(sessions) = &sessions_result
         && let Some(s) = sessions
             .iter()
-            .find(|s| matches!(s["phase"].as_str(), Some("waiting" | "active")))
+            .filter(|s| is_in_flight(s, now))
+            .min_by_key(|s| {
+                (
+                    s["phase"].as_str() != Some("active"),
+                    s["lockAt"].as_str().unwrap_or(""),
+                )
+            })
     {
         result.due = false;
         if s["phase"] == "active" {

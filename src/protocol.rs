@@ -247,8 +247,27 @@ impl EventStore {
     /// it owns.  Oldest-first also keeps the recent finished sessions that
     /// rest-break reads through aide for its fatigue and cooldown windows.
     pub fn prune(&self, dir: &Path, keep: &HashSet<String>) {
+        let _ = self.prune_dir(dir, keep);
+    }
+
+    /// Bound both `results/` and `requests/` in lockstep.
+    ///
+    /// `results/` accumulates ~3 files per session (`locked`, `observed`,
+    /// `unlocked`) while `requests/` has only 1 (`requested`), so `results/`
+    /// hits [`Self::PRUNE_TRIGGER`] much earlier.  Evicting a session's last
+    /// result without removing its `rest.requested` would turn a finished
+    /// session back into an orphaned waiting request.
+    pub fn prune_paired(&self, keep: &HashSet<String>) {
+        let evicted = self.prune_dir(&self.results_dir(), keep);
+        if !evicted.is_empty() {
+            self.remove_sessions(&self.requests_dir(), &evicted);
+        }
+        let _ = self.prune_dir(&self.requests_dir(), keep);
+    }
+
+    fn prune_dir(&self, dir: &Path, keep: &HashSet<String>) -> HashSet<String> {
         let Ok(entries) = fs::read_dir(dir) else {
-            return;
+            return HashSet::new();
         };
         let mut paths: Vec<(SystemTime, PathBuf)> = entries
             .filter_map(|e| e.ok())
@@ -282,6 +301,7 @@ impl EventStore {
 
         // Stage 1: every heartbeat but the newest one of its session.
         let mut drop = vec![false; candidates.len()];
+        let mut stage2_drop = vec![false; candidates.len()];
         let mut newest: HashMap<&str, usize> = HashMap::new();
         for (i, c) in candidates.iter().enumerate() {
             if c.observed
@@ -305,22 +325,65 @@ impl EventStore {
                     continue;
                 }
                 drop[i] = true;
+                stage2_drop[i] = true;
                 excess -= 1;
             }
         }
 
         let mut removed = 0;
+        let mut evicted = HashSet::new();
+        let mut surviving = HashSet::new();
         for (i, c) in candidates.iter().enumerate() {
             if drop[i] && fs::remove_file(&c.path).is_ok() {
                 cache.remove(&c.path);
                 removed += 1;
+                if stage2_drop[i]
+                    && let Some(sid) = c.session.as_deref()
+                {
+                    evicted.insert(sid.to_string());
+                }
+            } else if let Some(sid) = c.session.as_deref() {
+                surviving.insert(sid.to_string());
             }
         }
+        evicted.retain(|sid| !surviving.contains(sid));
         if removed > 0 {
             tracing::info!(
                 "pruned {removed} events from {} ({compacted} superseded heartbeats)",
                 dir.display()
             );
+        }
+        evicted
+    }
+
+    fn remove_sessions(&self, dir: &Path, sessions: &HashSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut removed = 0;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json")
+                || entry.file_name().to_string_lossy().starts_with(".tmp-")
+            {
+                continue;
+            }
+            let event = match cache.get(&path) {
+                Some((_, _, cached)) => cached.clone(),
+                None => Self::read_one(&path).ok().filter(|e| e.is_valid()),
+            };
+            if event
+                .as_ref()
+                .is_some_and(|e| sessions.contains(&e.session_id))
+                && fs::remove_file(&path).is_ok()
+            {
+                cache.remove(&path);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!("pruned {removed} paired events from {}", dir.display());
         }
     }
 
@@ -656,6 +719,69 @@ mod tests {
         assert!(
             names.contains(&format!("{:040}.json", 0)),
             "the live session's oldest file must survive the prune"
+        );
+    }
+
+    #[test]
+    fn prune_paired_removes_requests_for_evicted_results() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        fs::create_dir_all(store.requests_dir()).unwrap();
+        fs::create_dir_all(store.results_dir()).unwrap();
+
+        let mk = |sid: &str, kind: &str| {
+            format!(
+                concat!(
+                    r#"{{"schema":"input-locker.event/v1","eventId":"{}","#,
+                    r#""sessionId":"{}","type":"{}","#,
+                    r#""recordedAt":"2026-09-08T03:00:00Z","data":{{}}}}"#
+                ),
+                Uuid::new_v4(),
+                sid,
+                kind
+            )
+        };
+
+        // 260 completed sessions * 2 result files = 520 > PRUNE_TRIGGER (500),
+        // while requests/ has only 260 files (< PRUNE_TRIGGER).
+        for i in 0..260 {
+            let sid = format!("s{i:03}");
+            fs::write(
+                store.requests_dir().join(format!("{i:040}.json")),
+                mk(&sid, REQUESTED),
+            )
+            .unwrap();
+            fs::write(
+                store.results_dir().join(format!("{i:040}-a.json")),
+                mk(&sid, LOCKED),
+            )
+            .unwrap();
+            fs::write(
+                store.results_dir().join(format!("{i:040}-b.json")),
+                mk(&sid, UNLOCKED),
+            )
+            .unwrap();
+        }
+
+        // Session s000 is explicitly kept; s001..s110 are evicted from results.
+        let keep: HashSet<String> = ["s000".to_string()].into_iter().collect();
+        store.prune_paired(&keep);
+
+        let req_sids: HashSet<String> = store
+            .read_dir(&store.requests_dir())
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        let res_sids: HashSet<String> = store
+            .read_dir(&store.results_dir())
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+
+        assert!(req_sids.contains("s000"), "kept session request must stay");
+        assert_eq!(
+            req_sids, res_sids,
+            "every evicted session must lose its paired request too"
         );
     }
 

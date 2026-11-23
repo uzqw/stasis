@@ -275,7 +275,8 @@ impl Controller {
     /// Tick the schedule.  Returns zero or more status messages.
     pub fn tick(&mut self, locker: &mut impl LockOps, now: DateTime<Utc>) -> Vec<(String, bool)> {
         let mut out = Vec::new();
-        let sessions = self.sessions(now);
+        let events = self.store.events();
+        let sessions = project(&events, now);
 
         // Every rest emits a `rest.observed` heartbeat every 30 s, so without a
         // cap the results directory grows until the read cap starts dropping
@@ -293,8 +294,7 @@ impl Controller {
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
-            self.store.prune(&self.store.results_dir(), &keep);
-            self.store.prune(&self.store.requests_dir(), &keep);
+            self.store.prune_paired(&keep);
         }
         let mut active: Vec<_> = sessions
             .values()
@@ -303,9 +303,19 @@ impl Controller {
             .collect();
         active.sort_by_key(|s| s.lock_at);
 
-        // Handle non-active sessions first (expired waiting requests)
+        // Handle non-active sessions first (expired waiting requests).
+        // `project()` already flips past-window Waiting sessions to Skipped,
+        // so check against recorded `rest.expired` events to emit once.
+        let expired_recorded: HashSet<&str> = events
+            .iter()
+            .filter(|e| e.kind == EXPIRED)
+            .map(|e| e.session_id.as_str())
+            .collect();
         for s in sessions.values() {
-            if s.phase == Phase::Waiting && now >= s.unlock_at {
+            if s.phase == Phase::Skipped
+                && now >= s.unlock_at
+                && !expired_recorded.contains(s.session_id.as_str())
+            {
                 let _ = self.store.emit_result(
                     &s.session_id,
                     EXPIRED,
@@ -697,6 +707,29 @@ mod tests {
         let _msgs = ctrl.tick(&mut locker, base() + Duration::minutes(11));
         let sessions = ctrl.sessions(base() + Duration::minutes(11));
         assert_eq!(sessions["s1"].phase, Phase::Skipped);
+
+        let expired: Vec<_> = ctrl
+            .store
+            .events()
+            .into_iter()
+            .filter(|e| e.session_id == "s1" && e.kind == EXPIRED)
+            .collect();
+        assert_eq!(
+            expired.len(),
+            1,
+            "tick must emit a terminal rest.expired event for missed windows"
+        );
+        assert_eq!(expired[0].data["reason"], "window_missed");
+
+        // Subsequent ticks must not emit duplicate rest.expired events.
+        let _msgs = ctrl.tick(&mut locker, base() + Duration::minutes(12));
+        let expired_after = ctrl
+            .store
+            .events()
+            .into_iter()
+            .filter(|e| e.session_id == "s1" && e.kind == EXPIRED)
+            .count();
+        assert_eq!(expired_after, 1);
     }
 
     #[test]

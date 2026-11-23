@@ -612,3 +612,88 @@ fn cli_errors_emit_skip_json_and_exit_zero() {
         "{d:?}"
     );
 }
+
+#[test]
+fn expired_waiting_session_does_not_block_check_or_scheduling() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let past_lock = iso(Utc::now() - Duration::days(10));
+    let past_unlock = iso(Utc::now() - Duration::days(10) + Duration::minutes(10));
+    let request_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let calls = request_calls.clone();
+    let server = serve(move |_, _, body| {
+        let rpc: Value = serde_json::from_slice(body).unwrap();
+        let text = match rpc["params"]["name"].as_str().unwrap() {
+            "get_rest_sessions" => json!([{
+                "id": "ghost-session",
+                "phase": "waiting",
+                "lockAt": past_lock,
+                "unlockAt": past_unlock,
+                "segments": [],
+            }])
+            .to_string(),
+            "request_rest" => {
+                calls.fetch_add(1, Ordering::SeqCst);
+                r#"{"sessionId":"fresh-session","eventId":"e1","phase":"waiting"}"#.into()
+            }
+            name => panic!("unexpected tool {name}"),
+        };
+        (
+            200,
+            json!({"jsonrpc":"2.0", "id":1, "result":{"content":[{"type":"text", "text":text}]}})
+                .to_string(),
+        )
+    });
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+
+    let (code, out, err) = run_capture(&env, &["--check"]);
+    assert_eq!(code, 0, "stderr = {err}");
+    let d: Decision = serde_json::from_str(&out).unwrap();
+    assert!(
+        d.due,
+        "expired waiting session must not suppress due: {d:?}"
+    );
+    let s: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(s["state"], "ok");
+
+    let (code, _out, err) = run_capture(&env, &[]);
+    assert_eq!(code, 0, "stderr = {err}");
+    assert_eq!(request_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn future_waiting_session_still_shows_scheduled() {
+    let _g = serial();
+    let (_aw, _mcp, env, dir) = setup(due_events(), json!([]), &NO_WRITES);
+    let future_lock = iso(Utc::now() + Duration::minutes(1));
+    let future_unlock = iso(Utc::now() + Duration::minutes(11));
+    let server = serve(move |_, _, body| {
+        let rpc: Value = serde_json::from_slice(body).unwrap();
+        let text = match rpc["params"]["name"].as_str().unwrap() {
+            "get_rest_sessions" => json!([{
+                "id": "live-session",
+                "phase": "waiting",
+                "lockAt": future_lock,
+                "unlockAt": future_unlock,
+                "segments": [],
+            }])
+            .to_string(),
+            name => panic!("unexpected tool {name}"),
+        };
+        (
+            200,
+            json!({"jsonrpc":"2.0", "id":1, "result":{"content":[{"type":"text", "text":text}]}})
+                .to_string(),
+        )
+    });
+    *MCP_URL.lock().unwrap() = Some(server.url.clone());
+
+    let (code, out, err) = run_capture(&env, &["--check"]);
+    assert_eq!(code, 0, "stderr = {err}");
+    let d: Decision = serde_json::from_str(&out).unwrap();
+    assert!(!d.due, "live waiting session should suppress due: {d:?}");
+    let s: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("status.json")).unwrap()).unwrap();
+    assert_eq!(s["state"], "scheduled");
+}
