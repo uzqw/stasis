@@ -20,6 +20,8 @@ use serde_json::Value;
 
 /// rest-break writes once a minute; older than this means "not running".
 pub const STALE_AFTER: Duration = Duration::from_secs(180);
+/// Advance warning before an automatic rest freezes keyboard and mouse.
+pub const LEAD_TIME: Duration = Duration::from_secs(60);
 pub const MAX_MINUTES: i64 = 240;
 
 #[derive(Debug, Clone, PartialEq)]

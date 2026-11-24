@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
+use crate::notify::PreLockNotice;
+use crate::platform::is_grab_busy;
 use crate::protocol::{EXPIRED, Event, EventStore, FAILED, LOCKED, OBSERVED, REQUESTED, UNLOCKED};
 
 fn parse_time(s: &str) -> Option<DateTime<Utc>> {
@@ -224,6 +226,9 @@ pub trait LockOps {
     fn is_locked(&self) -> bool;
     fn start_lock(&mut self) -> anyhow::Result<()>;
     fn stop_lock(&mut self) -> anyhow::Result<()>;
+    /// Best-effort heads-up fired once when a scheduled session enters its
+    /// one-minute pre-lock window.
+    fn notify_pre_lock(&mut self, _notice: &PreLockNotice) {}
 }
 
 /// Rest-session controller.  Owns the event store and schedule.
@@ -237,10 +242,15 @@ pub struct Controller {
     /// `rest.failed` records.  One attempt per window is enough to notice
     /// recovery.
     last_lock_attempt: HashMap<String, DateTime<Utc>>,
+    /// Sessions that already received the 1-minute pre-lock notification.
+    notified_pre_lock: HashSet<String>,
 }
 
 /// Minimum spacing between failed lock attempts for the same session.
 const LOCK_RETRY_BACKOFF: Duration = Duration::seconds(10);
+/// Pre-lock warning window (slightly above 60 s so a `now + 60s` request
+/// notifies on the very first engine tick without waiting an extra second).
+pub const PRE_LOCK_NOTIFY_WINDOW: Duration = Duration::seconds(62);
 
 impl Controller {
     pub fn new(store: EventStore) -> Self {
@@ -248,6 +258,7 @@ impl Controller {
             store,
             pruned_at: None,
             last_lock_attempt: HashMap::new(),
+            notified_pre_lock: HashSet::new(),
         }
     }
 
@@ -295,6 +306,7 @@ impl Controller {
                 .map(|(id, _)| id.clone())
                 .collect();
             self.store.prune_paired(&keep);
+            self.notified_pre_lock.retain(|id| keep.contains(id));
         }
         let mut active: Vec<_> = sessions
             .values()
@@ -342,46 +354,59 @@ impl Controller {
                         continue;
                     }
                     let __lock_res = locker.start_lock();
-                    self.note_lock_attempt(&s.session_id, now, __lock_res.is_ok());
-                    if __lock_res.is_ok() {
-                        if open_segment {
-                            out.push(("计划休息已恢复锁定".into(), true));
-                            continue;
-                        }
-                        match self.store.emit_result(
-                            &s.session_id,
-                            LOCKED,
-                            json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
-                            now,
-                            None,
-                        ) {
-                            Ok(_) => out.push(("计划休息已恢复锁定".into(), true)),
-                            Err(_) => {
-                                let _ = locker.stop_lock();
-                                let _ = self.store.emit_result(
-                                    &s.session_id,
-                                    FAILED,
-                                    json!({
-                                        "action": "lock",
-                                        "error": "event write failed",
-                                        "retryable": true,
-                                    }),
-                                    now,
-                                    None,
-                                );
-                                out.push(("计划休息锁定失败".into(), false));
+                    match __lock_res {
+                        Ok(()) => {
+                            self.note_lock_attempt(&s.session_id, now, true);
+                            if open_segment {
+                                out.push(("计划休息已恢复锁定".into(), true));
+                                continue;
+                            }
+                            match self.store.emit_result(
+                                &s.session_id,
+                                LOCKED,
+                                json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
+                                now,
+                                None,
+                            ) {
+                                Ok(_) => out.push(("计划休息已恢复锁定".into(), true)),
+                                Err(_) => {
+                                    let _ = locker.stop_lock();
+                                    let _ = self.store.emit_result(
+                                        &s.session_id,
+                                        FAILED,
+                                        json!({
+                                            "action": "lock",
+                                            "error": "event write failed",
+                                            "retryable": true,
+                                        }),
+                                        now,
+                                        None,
+                                    );
+                                    out.push(("计划休息锁定失败".into(), false));
+                                }
                             }
                         }
-                    } else {
-                        let __e = __lock_res.err().map(|e| e.to_string()).unwrap_or_default();
-                        let _ = self.store.emit_result(
-                            &s.session_id,
-                            FAILED,
-                            json!({"action": "lock", "error": format!("lock failed: {}", __e), "retryable": true}),
-                            now,
-                            None,
-                        );
-                        out.push((format!("计划休息锁定失败: {}", __e), false));
+                        Err(e) if is_grab_busy(&e) => {
+                            // User is actively holding a key/button; retry on
+                            // the next 1 s tick without recording a failure.
+                            out.push(("等待按键松开后锁定".into(), true));
+                        }
+                        Err(e) => {
+                            self.note_lock_attempt(&s.session_id, now, false);
+                            let err_text = e.to_string();
+                            let _ = self.store.emit_result(
+                                &s.session_id,
+                                FAILED,
+                                json!({
+                                    "action": "lock",
+                                    "error": format!("lock failed: {err_text}"),
+                                    "retryable": true,
+                                }),
+                                now,
+                                None,
+                            );
+                            out.push((format!("计划休息锁定失败: {err_text}"), false));
+                        }
                     }
                 } else {
                     let through = s
@@ -458,6 +483,31 @@ impl Controller {
             }
         }
 
+        // Pre-lock heads-up: notify once when an upcoming scheduled session
+        // enters the one-minute window before `lock_at`.
+        if !locker.is_locked() {
+            let mut upcoming: Vec<_> = sessions
+                .values()
+                .filter(|s| s.phase == Phase::Waiting && now < s.lock_at && now < s.unlock_at)
+                .collect();
+            upcoming.sort_by_key(|s| s.lock_at);
+            for s in upcoming {
+                let until_lock = s.lock_at.signed_duration_since(now);
+                if until_lock <= PRE_LOCK_NOTIFY_WINDOW
+                    && self.notified_pre_lock.insert(s.session_id.clone())
+                {
+                    let dur_secs = (s.unlock_at - s.lock_at).num_seconds().max(60) as u64;
+                    let notice = PreLockNotice {
+                        session_id: s.session_id.clone(),
+                        seconds_until_lock: until_lock.num_seconds().max(1) as u64,
+                        rest_minutes: dur_secs.div_ceil(60),
+                    };
+                    locker.notify_pre_lock(&notice);
+                    out.push(("即将开始计划休息（1 分钟后锁定）".into(), true));
+                }
+            }
+        }
+
         // Waiting sessions that are due to start
         let mut waiting: Vec<_> = sessions
             .values()
@@ -472,42 +522,51 @@ impl Controller {
             if self.lock_failed_recently(&s.session_id, now) {
                 continue;
             }
-            let lock_res = locker.start_lock();
-            self.note_lock_attempt(&s.session_id, now, lock_res.is_ok());
-            if lock_res.is_ok() {
-                match self.store.emit_result(
-                    &s.session_id,
-                    LOCKED,
-                    json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
-                    now,
-                    None,
-                ) {
-                    Ok(_) => out.push(("计划休息已锁定".into(), true)),
-                    Err(_) => {
-                        let _ = locker.stop_lock();
-                        let _ = self.store.emit_result(
-                            &s.session_id,
-                            FAILED,
-                            json!({
-                                "action": "lock",
-                                "error": "event write failed",
-                                "retryable": true,
-                            }),
-                            now,
-                            None,
-                        );
-                        out.push(("计划休息锁定失败".into(), false));
+            match locker.start_lock() {
+                Ok(()) => {
+                    self.note_lock_attempt(&s.session_id, now, true);
+                    match self.store.emit_result(
+                        &s.session_id,
+                        LOCKED,
+                        json!({"lockedAt": iso(now), "lockedThrough": iso(now)}),
+                        now,
+                        None,
+                    ) {
+                        Ok(_) => out.push(("计划休息已锁定".into(), true)),
+                        Err(_) => {
+                            let _ = locker.stop_lock();
+                            let _ = self.store.emit_result(
+                                &s.session_id,
+                                FAILED,
+                                json!({
+                                    "action": "lock",
+                                    "error": "event write failed",
+                                    "retryable": true,
+                                }),
+                                now,
+                                None,
+                            );
+                            out.push(("计划休息锁定失败".into(), false));
+                        }
                     }
                 }
-            } else {
-                let _ = self.store.emit_result(
-                    &s.session_id,
-                    FAILED,
-                    json!({"action": "lock", "error": "lock failed", "retryable": true}),
-                    now,
-                    None,
-                );
-                out.push(("计划休息锁定失败".into(), false));
+                Err(e) if is_grab_busy(&e) => {
+                    // Keys/buttons are currently held down; try again on the
+                    // next 1 s tick once the user releases them, without
+                    // emitting `rest.failed` or backing off 10 s.
+                    out.push(("等待按键松开后锁定".into(), true));
+                }
+                Err(_) => {
+                    self.note_lock_attempt(&s.session_id, now, false);
+                    let _ = self.store.emit_result(
+                        &s.session_id,
+                        FAILED,
+                        json!({"action": "lock", "error": "lock failed", "retryable": true}),
+                        now,
+                        None,
+                    );
+                    out.push(("计划休息锁定失败".into(), false));
+                }
             }
         }
 
@@ -1017,5 +1076,136 @@ mod tests {
             .filter(|e| e.kind == LOCKED)
             .count();
         assert_eq!(locks, 1, "resuming a lock must not emit a new rest.locked");
+    }
+
+    struct RecordingLocker {
+        locked: bool,
+        busy: bool,
+        notices: Vec<PreLockNotice>,
+    }
+
+    impl RecordingLocker {
+        fn new() -> Self {
+            Self {
+                locked: false,
+                busy: false,
+                notices: Vec::new(),
+            }
+        }
+    }
+
+    impl LockOps for RecordingLocker {
+        fn is_locked(&self) -> bool {
+            self.locked
+        }
+
+        fn start_lock(&mut self) -> anyhow::Result<()> {
+            if self.busy {
+                return Err(anyhow::Error::new(crate::platform::GrabBusy(
+                    "keys held".into(),
+                )));
+            }
+            self.locked = true;
+            Ok(())
+        }
+
+        fn stop_lock(&mut self) -> anyhow::Result<()> {
+            self.locked = false;
+            Ok(())
+        }
+
+        fn notify_pre_lock(&mut self, notice: &PreLockNotice) {
+            self.notices.push(notice.clone());
+        }
+    }
+
+    #[test]
+    fn pre_lock_notification_fires_once_within_one_minute_window() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = RecordingLocker::new();
+        let mut ctrl = Controller::new(store);
+        // Scheduled 10 minutes out, 15-minute rest.
+        request(&ctrl.store, "s1", 10, 15);
+
+        // Far before the 1-minute window: silent.
+        ctrl.tick(&mut locker, base());
+        ctrl.tick(&mut locker, base() + Duration::minutes(8));
+        assert!(locker.notices.is_empty());
+        assert!(!locker.is_locked());
+
+        // Entering the 1-minute window: notifies exactly once.
+        let msgs = ctrl.tick(&mut locker, base() + Duration::minutes(9));
+        assert_eq!(locker.notices.len(), 1);
+        assert_eq!(locker.notices[0].session_id, "s1");
+        assert_eq!(locker.notices[0].seconds_until_lock, 60);
+        assert_eq!(locker.notices[0].rest_minutes, 15);
+        assert!(msgs.iter().any(|(m, ok)| *ok && m.contains("1 分钟后锁定")));
+
+        // Subsequent ticks inside the same window must not spam notifications.
+        ctrl.tick(
+            &mut locker,
+            base() + Duration::minutes(9) + Duration::seconds(10),
+        );
+        assert_eq!(locker.notices.len(), 1);
+
+        // At lock_at: locks cleanly without another notification.
+        ctrl.tick(&mut locker, base() + Duration::minutes(10));
+        assert!(locker.is_locked());
+        assert_eq!(locker.notices.len(), 1);
+    }
+
+    #[test]
+    fn autorest_sixty_second_lead_notifies_immediately_then_locks() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = RecordingLocker::new();
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 1, 10);
+
+        ctrl.tick(&mut locker, base());
+        assert_eq!(locker.notices.len(), 1);
+        assert_eq!(locker.notices[0].seconds_until_lock, 60);
+        assert_eq!(locker.notices[0].rest_minutes, 10);
+        assert!(!locker.is_locked());
+
+        ctrl.tick(&mut locker, base() + Duration::seconds(60));
+        assert!(locker.is_locked());
+    }
+
+    #[test]
+    fn immediate_rest_locks_without_pre_lock_notification() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = RecordingLocker::new();
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        ctrl.tick(&mut locker, base());
+        assert!(locker.is_locked());
+        assert!(locker.notices.is_empty());
+    }
+
+    #[test]
+    fn grab_busy_defers_lock_without_failed_event_or_backoff() {
+        let tmp = TempDir::new().unwrap();
+        let store = EventStore::new(tmp.path());
+        let mut locker = RecordingLocker::new();
+        locker.busy = true;
+        let mut ctrl = Controller::new(store);
+        request(&ctrl.store, "s1", 0, 10);
+
+        // Key is held at t = 0: lock is deferred without recording rest.failed.
+        let msgs = ctrl.tick(&mut locker, base());
+        assert!(!locker.is_locked());
+        assert!(msgs.iter().any(|(m, ok)| *ok && m == "等待按键松开后锁定"));
+        assert!(!ctrl.store.events().iter().any(|e| e.kind == FAILED));
+
+        // 1 s later (well inside the 10 s failure backoff!) key is released:
+        // must lock immediately without waiting 10 s.
+        locker.busy = false;
+        let msgs = ctrl.tick(&mut locker, base() + Duration::seconds(1));
+        assert!(locker.is_locked());
+        assert!(msgs.iter().any(|(m, ok)| *ok && m == "计划休息已锁定"));
     }
 }

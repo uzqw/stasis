@@ -7,9 +7,10 @@
 
 Omarchy 用 Hyprland（Wayland）和 Quickshell 写的 omarchy shell。适配分两部分：
 
-1. **锁定后端不用改**。Linux 后端直接对 `/dev/input/event*` 做 `EVIOCGRAB`，
-   抓取发生在内核层、合成器之前；Hyprland 收不到被抓住的键鼠事件，所以
-   Wayland 下同样能锁。前提是进程有 `input` 组权限。
+1. **锁定后端在抓取前等待按键释放**。Linux 后端直接对 `/dev/input/event*` 做
+   `EVIOCGRAB`，抓取发生在内核层、合成器之前；由于 `EVIOCGRAB` 不会向合成器补发
+   按键释放事件，后端先通过 `EVIOCGKEY` 确认没有按下的键或鼠标按钮（并在抓取后
+   立即复检消除竞态），防止打字瞬间锁屏导致 Wayland 客户端无限自动连发。
 2. **UI 换成状态栏组件**。不再依赖托盘或常驻窗口：`stasis daemon` 只跑引擎，
    把状态写进 JSON；omarchy shell 的 bar widget 读状态、通过 CLI 发起休息。
 
@@ -218,9 +219,12 @@ stasis daemon ──rest.locked/unlocked──► events/ ────┘       
 `set_locker_plan`，没有 rest-break 调用的 `request_rest` / `get_rest_sessions`，
 所以 rest-break 的调度路径在这里会失败。`autorest` 不改模型，只读 rest-break
 已经写好的 `due` / `restMinutes`，检查 daemon 存活、没有进行中的休息、
-rest-break 的 `cooldownUntil`（休息结束后 15 分钟）已过，然后写一条与
-`stasis rest` 相同的 `rest.requested`。冷却只认 rest-break 的字段，bar 的
-“now”和实际锁定因此不会互相矛盾。`stasis-autorest.timer` 每分钟跑一次。
+rest-break 的 `cooldownUntil`（休息结束后 15 分钟）已过，然后写一条提前 1 分钟
+（`lockAt = now + 60s`）的 `rest.requested`。`stasis daemon` 在计划会话进入锁屏前
+1 分钟窗口时发送一次系统桌面通知（优先走 `omarchy-notification-send`，回退
+`notify-send`），状态栏同步显示锁屏前倒计时，让用户有时间收尾保存。冷却只认
+rest-break 的字段，bar 的“now”和实际锁定因此不会互相矛盾。
+`stasis-autorest.timer` 每分钟跑一次。
 
 - 为什么不用官方 `aw-watcher-afk`：它用 pynput 读 X11，Hyprland 下看不到
   输入，会一直报「活跃」。`stasis afk` 读同一批 evdev 设备，不需要抓取，

@@ -280,7 +280,7 @@ pub fn execute_rest_request(env: &Env, result: &Decision) -> Result<Time, String
         last_error: String::new(),
     };
     write_json_atomic(&pending_path, &pending)?;
-    let lock_at = Utc::now() + Duration::seconds(30);
+    let lock_at = Utc::now() + Duration::seconds(60);
     let unlock_at = lock_at + Duration::minutes(result.rest_minutes as i64);
     let accepted = mcp_call(
         env,

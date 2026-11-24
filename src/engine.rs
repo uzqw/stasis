@@ -7,7 +7,8 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::config::Config;
 use crate::keypad::{Action, Keypad};
-use crate::platform::{BackendEvent, Grab};
+use crate::notify::PreLockNotice;
+use crate::platform::{BackendEvent, Grab, is_grab_busy};
 use crate::protocol::EventStore;
 use crate::session::{Controller, LockOps, Phase};
 use crate::status::{SessionInfo, Status};
@@ -102,6 +103,10 @@ impl LockOps for BackendHandle {
         self.state = BackendState::Idle;
         self._keepawake = None;
         Ok(())
+    }
+
+    fn notify_pre_lock(&mut self, notice: &PreLockNotice) {
+        crate::notify::send_pre_lock(notice);
     }
 }
 
@@ -216,8 +221,13 @@ fn run(mut config: Config, snapshot: Arc<Mutex<Snapshot>>, cmd_rx: Receiver<UiCm
                             }
                             Err(e) => {
                                 tracing::warn!("lock failed: {e}");
+                                let msg = if is_grab_busy(&e) {
+                                    "检测到按键未松开，请松开后再试".into()
+                                } else {
+                                    format!("锁定失败: {}", e)
+                                };
                                 update(&snapshot, |s| {
-                                    s.message = format!("锁定失败: {}", e);
+                                    s.message = msg;
                                     s.ok = false;
                                 });
                             }

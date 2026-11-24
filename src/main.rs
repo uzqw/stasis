@@ -194,7 +194,7 @@ fn cli_rest(args: &[String]) -> i32 {
         }
     }
 
-    match emit_rest(minutes, "omarchy-bar", "manual") {
+    match emit_rest(minutes, Duration::ZERO, "omarchy-bar", "manual") {
         Ok(session_id) => {
             println!("{session_id}");
             0
@@ -207,17 +207,18 @@ fn cli_rest(args: &[String]) -> i32 {
 }
 
 /// Write the same `rest.requested` event aide and the bar use.
-fn emit_rest(minutes: u32, source: &str, reason: &str) -> Result<String, String> {
+fn emit_rest(minutes: u32, lead: Duration, source: &str, reason: &str) -> Result<String, String> {
     let cfg = Config::load().unwrap_or_default();
     let store = EventStore::new(cfg.effective_events_dir());
     store
         .ensure_dirs()
         .map_err(|e| format!("cannot create event directory: {e}"))?;
     let now = Utc::now();
+    let lock_at = now + ChronoDuration::seconds(lead.as_secs() as i64);
     let session_id = Uuid::new_v4().to_string().replace('-', "");
     let data = serde_json::json!({
-        "lockAt": stasis::status::iso(now),
-        "unlockAt": stasis::status::iso(now + ChronoDuration::minutes(minutes as i64)),
+        "lockAt": stasis::status::iso(lock_at),
+        "unlockAt": stasis::status::iso(lock_at + ChronoDuration::minutes(minutes as i64)),
         "source": source,
         "reason": reason,
     });
@@ -272,19 +273,24 @@ fn cli_autorest(args: &[String]) -> i32 {
 
     let decision = stasis::autorest::decide(&snapshot, locked, SystemTime::now());
     match decision {
-        Some(d) => match emit_rest(d.minutes, "rest-break", &d.reason) {
-            Ok(id) => {
-                eprintln!(
-                    "stasis autorest: scheduled {} min ({}) session {id}",
-                    d.minutes, d.reason
-                );
-                0
+        Some(d) => {
+            let lead = stasis::autorest::LEAD_TIME;
+            match emit_rest(d.minutes, lead, "rest-break", &d.reason) {
+                Ok(id) => {
+                    eprintln!(
+                        "stasis autorest: scheduled {} min in {}s ({}) session {id}",
+                        d.minutes,
+                        lead.as_secs(),
+                        d.reason
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("stasis autorest: {e}");
+                    1
+                }
             }
-            Err(e) => {
-                eprintln!("stasis autorest: {e}");
-                1
-            }
-        },
+        }
         None => 0,
     }
 }

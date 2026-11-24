@@ -94,6 +94,7 @@ BarWidget {
   property bool online: false
   property bool locked: false
   property string phase: ""
+  property string lockAt: ""
   property string unlockAt: ""
   property bool failed: false
   property double nowMs: Date.now()
@@ -106,6 +107,7 @@ BarWidget {
   function close() { panelOpen = false }
   function togglePanel() { panelOpen ? close() : open() }
 
+  readonly property int lockInSeconds: secondsUntil(lockAt)
   readonly property int remainingSeconds: secondsUntil(unlockAt)
   readonly property bool starting: online && !locked && !failed && phase === "waiting" && remainingSeconds > 0
 
@@ -169,7 +171,7 @@ BarWidget {
 
   readonly property string label: {
     if (root.online && root.locked) return clockText(remainingSeconds)
-    if (root.starting) return "…"
+    if (root.starting) return lockInSeconds > 0 ? "in " + clockText(lockInSeconds) : "…"
     // Idle: when the next rest starts.  Fatigue is the model's input, not
     // something the user can act on; "in 42m" answers the actual question.
     if (root.restBreakOnline && root.nextRestAt.length > 0) {
@@ -192,7 +194,7 @@ BarWidget {
     if (!online) return "Daemon offline"
     if (locked) return "Resting — " + clockText(remainingSeconds) + " left"
     if (failed) return "Last rest failed"
-    if (starting) return "Starting rest…"
+    if (starting) return lockInSeconds > 0 ? "Starting in " + clockText(lockInSeconds) : "Starting rest…"
     return "Ready"
   }
 
@@ -214,7 +216,7 @@ BarWidget {
     if (!online) base = "Stasis: daemon offline\nsystemctl --user start stasis"
     else if (locked) base = "Stasis: resting — " + clockText(remainingSeconds) + " left\nUnlock: press j three times, then your password"
     else if (failed) base = "Stasis: last rest failed — see `stasis status`"
-    else if (starting) base = "Stasis: starting rest…"
+    else if (starting) base = lockInSeconds > 0 ? "Stasis: locking in " + clockText(lockInSeconds) : "Stasis: starting rest…"
     else base = "Stasis: ready — click for rest lengths"
     return root.restBreakTooltip.length > 0 ? base + "\n" + root.restBreakTooltip : base
   }
@@ -232,6 +234,7 @@ BarWidget {
       root.online = false
       root.locked = false
       root.phase = ""
+      root.lockAt = ""
       root.unlockAt = ""
       root.failed = false
       return
@@ -242,6 +245,7 @@ BarWidget {
     root.state = parsed
     root.locked = parsed.locked === true
     root.phase = String(parsed.session && parsed.session.phase ? parsed.session.phase : "")
+    root.lockAt = String(parsed.session && parsed.session.lockAt ? parsed.session.lockAt : "")
     root.unlockAt = String(parsed.session && parsed.session.unlockAt ? parsed.session.unlockAt : "")
     // A stale failure message outlives its session: only report failure while
     // an unfinished rest session exists, otherwise the icon stays red forever

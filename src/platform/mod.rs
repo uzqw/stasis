@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -6,6 +7,25 @@ use std::time::Duration;
 use crossbeam_channel::{Sender, bounded};
 
 use crate::keymap::RawKey;
+
+/// Returned when input devices currently have keys or buttons held down, so
+/// grabbing now would trap pressed keys in the compositor's auto-repeat state.
+/// Callers should retry shortly rather than recording a hard lock failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrabBusy(pub String);
+
+impl fmt::Display for GrabBusy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GrabBusy {}
+
+/// True when `err` indicates that locking was deferred until held keys release.
+pub fn is_grab_busy(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<GrabBusy>().is_some()
+}
 
 /// Event from a platform backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,8 +165,16 @@ impl JoinTimeout for JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Liveness;
+    use super::{GrabBusy, Liveness, is_grab_busy};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn grab_busy_downcasts_cleanly() {
+        let busy = anyhow::Error::new(GrabBusy("keys held".into()));
+        assert!(is_grab_busy(&busy));
+        let hard = anyhow::anyhow!("permission denied");
+        assert!(!is_grab_busy(&hard));
+    }
 
     #[test]
     fn liveness_flags_a_silent_thread() {
