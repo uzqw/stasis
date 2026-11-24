@@ -36,7 +36,11 @@ mkdir -p "$(dirname "$plugin_dir")"
 if [ -L "$plugin_dir" ]; then
   rm "$plugin_dir"
 elif [ -e "$plugin_dir" ]; then
-  mv "$plugin_dir" "$plugin_dir.bak-$(date +%s)"
+  # Keep backups outside ~/.config/omarchy/plugins/: PluginRegistry scans every
+  # subdirectory there and a trailing `.bak-*` with the same manifest id wins.
+  backup_dir="${XDG_STATE_HOME:-$HOME/.local/state}/stasis/plugin-backups"
+  mkdir -p "$backup_dir"
+  mv "$plugin_dir" "$backup_dir/$plugin_id.bak-$(date +%s)"
 fi
 cp -r "$repo_dir/omarchy/plugin" "$plugin_dir"
 

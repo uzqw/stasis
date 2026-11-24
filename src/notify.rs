@@ -46,8 +46,31 @@ pub fn send_pre_lock(notice: &PreLockNotice) {
 
 #[cfg(target_os = "linux")]
 fn dispatch_os_notification(summary: &str, body: &str) {
-    // Omarchy ships `omarchy-notification-send`, which speaks typed D-Bus
-    // parameters via `busctl` and renders the sleep glyph in the toast header.
+    // Multi-monitor path on Omarchy: `omarchy.notifications` only renders its
+    // D-Bus toast deck on the single focused output, whereas `stasis.rest` has
+    // a live bar-widget instance on every connected screen and broadcasts its
+    // layer-shell pre-lock banner across all monitors simultaneously.
+    let mut shell_cmd = Command::new("omarchy-shell");
+    if std::env::var_os("OMARCHY_PATH").is_none()
+        && std::path::Path::new("/usr/share/omarchy/shell/shell.qml").exists()
+    {
+        shell_cmd.env("OMARCHY_PATH", "/usr/share/omarchy");
+    }
+    let multi_screen_ok = shell_cmd
+        .args(["stasis.rest", "notify", summary, body])
+        .output()
+        .is_ok_and(|out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .starts_with("ok:")
+        });
+    if multi_screen_ok {
+        return;
+    }
+
+    // Fallback when the `stasis.rest` bar widget is not mounted: Omarchy's
+    // single-display notification helper, then standard freedesktop notify-send.
     let omarchy_ok = Command::new("omarchy-notification-send")
         .args([
             "--app-name",

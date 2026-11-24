@@ -221,9 +221,11 @@ stasis daemon ──rest.locked/unlocked──► events/ ────┘       
 已经写好的 `due` / `restMinutes`，检查 daemon 存活、没有进行中的休息、
 rest-break 的 `cooldownUntil`（休息结束后 15 分钟）已过，然后写一条提前 1 分钟
 （`lockAt = now + 60s`）的 `rest.requested`。`stasis daemon` 在计划会话进入锁屏前
-1 分钟窗口时发送一次系统桌面通知（优先走 `omarchy-notification-send`，回退
-`notify-send`），状态栏同步显示锁屏前倒计时，让用户有时间收尾保存。冷却只认
-rest-break 的字段，bar 的“now”和实际锁定因此不会互相矛盾。
+1 分钟窗口时发送一次系统桌面通知：Omarchy 下优先通过 `omarchy-shell stasis.rest notify`
+由每个屏幕上的 `BarWidget` 实例在**所有显示器**同步弹出不抢焦点的 layer-shell 提醒卡片
+（原生 `omarchy.notifications` 只显示在当前聚焦屏），未挂载插件或其他桌面时回退
+`omarchy-notification-send` / `notify-send`；状态栏同步显示锁屏前倒计时，让用户有时间
+收尾保存。冷却只认 rest-break 的字段，bar 的“now”和实际锁定因此不会互相矛盾。
 `stasis-autorest.timer` 每分钟跑一次。
 
 - 为什么不用官方 `aw-watcher-afk`：它用 pynput 读 X11，Hyprland 下看不到

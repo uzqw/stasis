@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -93,11 +94,70 @@ BarWidget {
   property var state: ({})
   property bool online: false
   property bool locked: false
+  property string sessionId: ""
   property string phase: ""
   property string lockAt: ""
   property string unlockAt: ""
   property bool failed: false
   property double nowMs: Date.now()
+
+  // Multi-screen pre-lock toast: Omarchy's D-Bus notification daemon only
+  // renders on the focused display, whereas a BarWidget instance lives on
+  // every screen's bar.  Each instance maps a non-focus-stealing layer-shell
+  // toast on its own screen so the 1-minute warning is visible everywhere.
+  readonly property var barWindow: root.QsWindow.window
+  readonly property var barScreen: barWindow ? barWindow.screen : null
+  readonly property real barThicknessOnScreen: {
+    if (!root.bar || root.bar.barHidden) return 0
+    if (typeof root.bar.barSizeFor === "function" && root.barScreen) {
+      return Number(root.bar.barSizeFor(root.barScreen.name)) || root.barSize
+    }
+    return root.barSize
+  }
+  property bool toastOpen: false
+  property string toastSummary: ""
+  property string toastBody: ""
+  property string lastNotifiedSessionId: ""
+
+  onLockedChanged: {
+    if (root.locked) root.hideToast()
+  }
+
+  function allInstances() {
+    return root.bar && typeof root.bar.moduleWidgets === "function"
+      ? root.bar.moduleWidgets(root.moduleName) : [root]
+  }
+
+  function defaultToastBody() {
+    var start = Date.parse(root.lockAt)
+    var end = Date.parse(root.unlockAt)
+    var mins = (!isNaN(start) && !isNaN(end) && end > start)
+      ? Math.max(1, Math.round((end - start) / 60000)) : 10
+    if (root.lockInSeconds >= 45) {
+      return "1 分钟后将锁定键鼠休息 " + mins + " 分钟，请提前保存当前工作。"
+    }
+    var secs = Math.max(1, root.lockInSeconds)
+    return secs + " 秒后将锁定键鼠休息 " + mins + " 分钟，请提前保存当前工作。"
+  }
+
+  function triggerPreLockToast(summary, body) {
+    if (root.sessionId !== "") {
+      root.lastNotifiedSessionId = root.sessionId
+    }
+    root.toastSummary = String(summary || "即将锁屏休息")
+    root.toastBody = String(body || root.defaultToastBody())
+    root.toastOpen = true
+    toastHideTimer.restart()
+  }
+
+  function hideToast() {
+    root.toastOpen = false
+    toastHideTimer.stop()
+  }
+
+  function dismissToastEverywhere() {
+    root.broadcast("hideToast")
+  }
 
   // Panel lifecycle.  `opened` / `open()` / `close()` are the contract the bar
   // uses to route popout ownership and hotkey summoning.
@@ -233,10 +293,12 @@ BarWidget {
       root.state = ({})
       root.online = false
       root.locked = false
+      root.sessionId = ""
       root.phase = ""
       root.lockAt = ""
       root.unlockAt = ""
       root.failed = false
+      root.hideToast()
       return
     }
     var updated = Date.parse(String(parsed.updatedAt || ""))
@@ -244,6 +306,7 @@ BarWidget {
     root.online = age >= 0 && age <= 5000
     root.state = parsed
     root.locked = parsed.locked === true
+    root.sessionId = String(parsed.session && parsed.session.sessionId ? parsed.session.sessionId : "")
     root.phase = String(parsed.session && parsed.session.phase ? parsed.session.phase : "")
     root.lockAt = String(parsed.session && parsed.session.lockAt ? parsed.session.lockAt : "")
     root.unlockAt = String(parsed.session && parsed.session.unlockAt ? parsed.session.unlockAt : "")
@@ -251,6 +314,15 @@ BarWidget {
     // an unfinished rest session exists, otherwise the icon stays red forever
     // after a single failed attempt.
     root.failed = parsed.ok === false && !root.locked && root.phase === "waiting"
+
+    // Belt-and-suspenders: if status.json enters the 1-minute waiting window
+    // before (or without) the IPC call, pop the toast on this screen once per
+    // sessionId so no monitor ever misses the heads-up.
+    if (root.online && !root.locked && root.phase === "waiting"
+        && root.sessionId !== "" && root.sessionId !== root.lastNotifiedSessionId
+        && root.lockInSeconds > 0 && root.lockInSeconds <= 62) {
+      root.triggerPreLockToast("即将锁屏休息", root.defaultToastBody())
+    }
   }
 
   function startRest(minutes) {
@@ -316,6 +388,13 @@ BarWidget {
     }
   }
 
+  Timer {
+    id: toastHideTimer
+    interval: 15000
+    repeat: false
+    onTriggered: root.toastOpen = false
+  }
+
   IpcHandler {
     target: "stasis.rest"
 
@@ -324,6 +403,159 @@ BarWidget {
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function rest(minutes: int): void { root.startRest(Number(minutes)) }
+    function dismissToast(): string {
+      root.dismissToastEverywhere()
+      return "ok"
+    }
+    function notify(summary: string, body: string): string {
+      var items = root.allInstances()
+      var shown = 0
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && typeof items[i].triggerPreLockToast === "function") {
+          items[i].triggerPreLockToast(summary, body)
+          shown++
+        }
+      }
+      return shown > 0 ? "ok:" + shown : "none"
+    }
+    function probe(): string {
+      var items = root.allInstances()
+      var screens = []
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (!it) continue
+        screens.push({
+          screen: it.barScreen ? String(it.barScreen.name) : "",
+          toastOpen: it.toastOpen === true,
+          summary: String(it.toastSummary || "")
+        })
+      }
+      return JSON.stringify({ count: screens.length, screens: screens })
+    }
+  }
+
+  PanelWindow {
+    id: preLockToastWindow
+    visible: (root.toastOpen || toastCard.opacity > 0) && !!root.barScreen
+    screen: root.barScreen
+    color: "transparent"
+
+    WlrLayershell.namespace: "stasis-prelock-toast"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+
+    anchors {
+      top: true
+      right: true
+    }
+    margins.top: ((root.bar && root.bar.position === "top") ? root.barThicknessOnScreen : 0) + Style.gapsOut
+    margins.right: ((root.bar && root.bar.position === "right") ? root.barThicknessOnScreen : 0) + Style.gapsOut
+    implicitWidth: Style.space(380)
+    implicitHeight: toastCard.height + Style.space(4)
+
+    mask: Region { item: root.toastOpen ? toastCard : null }
+
+    BorderSurface {
+      id: toastCard
+      width: Style.space(380)
+      height: toastCard.contentTopInset + toastColumn.implicitHeight + toastCard.contentBottomInset
+      color: Commons.Color.notifications.background
+      borderSpec: Border.surfaceSpec(
+        "notifications",
+        "border",
+        Commons.Color.notifications.border,
+        Math.max(1, Style.space(2))
+      )
+      padding: Style.space(12)
+      radius: Style.cornerRadius
+
+      property real shown: root.toastOpen ? 1 : 0
+      Behavior on shown {
+        id: toastAnim
+        NumberAnimation {
+          duration: Style.duration(toastAnim.targetValue > 0 ? 180 : 120)
+          easing.type: Easing.Bezier
+          easing.bezierCurve: Style.easeOut
+        }
+      }
+      opacity: shown
+      scale: 0.97 + 0.03 * shown
+      transformOrigin: Item.TopRight
+
+      Column {
+        id: toastColumn
+        x: toastCard.contentLeftInset
+        y: toastCard.contentTopInset
+        width: toastCard.width - toastCard.contentLeftInset - toastCard.contentRightInset
+        spacing: Style.space(6)
+
+        Rectangle {
+          width: parent.width
+          height: Math.max(2, Style.space(3))
+          radius: height / 2
+          color: Commons.Color.notifications.countdown
+        }
+
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Text {
+            id: toastGlyph
+            textFormat: Text.PlainText
+            text: "󰒲"
+            color: Commons.Color.notifications.countdown
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            id: toastTitle
+            textFormat: Text.PlainText
+            width: Math.max(
+              0,
+              parent.width - toastGlyph.implicitWidth - toastCountdown.implicitWidth
+                - (toastCountdown.visible ? 2 : 1) * parent.spacing
+            )
+            elide: Text.ElideRight
+            text: root.toastSummary
+            color: Commons.Color.notifications.text
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Text {
+            id: toastCountdown
+            textFormat: Text.PlainText
+            visible: root.starting && root.lockInSeconds > 0
+            text: root.clockText(root.lockInSeconds)
+            color: Commons.Color.notifications.countdown
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+        }
+
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          visible: root.toastBody.length > 0
+          text: root.toastBody
+          color: Qt.darker(Commons.Color.notifications.text, 1.12)
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.dismissToastEverywhere()
+      }
+    }
   }
 
   WidgetButton {
